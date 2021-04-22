@@ -45,7 +45,7 @@ TCPPeer::pointer
 TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
 {
 
-    CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - start" << address.toString();
+
     assert(address.getType() == PeerBareAddress::Type::IPv4);
     assertThreadIsMain();
     auto bufferedAsioSocket = make_shared<SocketType>(app.getClock().getIOContext(), BUFSZ);
@@ -79,10 +79,20 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
     asio::io_context io_context;
     asio::ip::tcp::socket basicAsioTcpSocket(io_context);
     asio::ip::tcp::resolver resolver(io_context);
-    asio::ip::tcp::endpoint endpoint = asio::connect(basicAsioTcpSocket, resolver.resolve("127.0.0.1", "11630"));
+    asio::ip::tcp::endpoint endpoint = asio::connect(basicAsioTcpSocket, resolver.resolve("127.0.0.1", "11630")); //TODO: remove hardcoded value
+    CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - tcp connection established to edge proxy: " << address.toString();
+
+    
     size_t request_length = xdrBytes->raw_size();
     //following blocks until the full request has been written to socket
     asio::write(basicAsioTcpSocket, asio::buffer(xdrBytes->raw_data(), request_length));
+    CLOG(INFO, "Overlay") << "== Step 2 in stellar-core peer connection protocol: send a HELLO message type to remote peer." 
+    << "  This message contains:  pinger's public key signed with our network ID (i.e. our hashed network password phrase)"
+    << " , created certificate in from step 1, a nonce."
+    ;
+
+    CLOG(INFO, "Overlay") << "NOTE: use the pinger's signed cert hash value to trace request at remote peer." 
+    ;
 
     //== now read response on connected socket
     std::vector<uint8_t> respHttpHdr; //we just want 4 bytes which represents the http response hdr
@@ -126,7 +136,7 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
                     "  size of body length {}", httpRespBodyLen) );
     }
 
-    CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - the response body length is: " << httpRespBodyLen;
+    CLOG(INFO, "Overlay") << "== Step 3 in stellar-core peer connection protocol:  remote peer validated/accepted our cert and sends HELLO back,  response body length is: " << httpRespBodyLen;
 
     std::vector<uint8_t> respHttpBody;
     respHttpBody.resize(httpRespBodyLen);
@@ -148,17 +158,21 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
         xdr::xdr_argpack_archive(g, am);
         stellar::StellarMessage sm = am.v0().message;
         stellar::MessageType msgType = sm.type();
-        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received response from peer, messge type:" << msgType;
         if (msgType == stellar::MessageType::ERROR_MSG) {
+            CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - unmarshalled xdr bytes, received response from peer of messge type:" << msgType;
             stellar::Error & error = sm.error();
             stellar::ErrorCode ec = error.code;
-            throw std::runtime_error(fmt::format("TCPPeer::initiateSynch - received error msg from peer, error code: {}, error msg: {}", ec, std::string{error.msg}) );
+            throw std::runtime_error(fmt::format("TCPPeer::initiateSynch - unmarshalled xdr bytes, received error msg from peer, error code: {}, error msg: {}", ec, std::string{error.msg}) );
             
         } else if (msgType == stellar::MessageType::HELLO) {
-            CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received hello response from peer."
+            CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - unmarshalled xdr bytes, received hello response from peer."
                 << "  Will now update peer's metadata and derive the mac key from peer's cert."
                 ;
             stellar::Hello helloMsg = sm.hello();
+            CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - metadata about remote peer from HELLO response."
+                << ", stellar-core version: " << helloMsg.versionStr
+                << "  Ledger version: " << helloMsg.ledgerVersion
+                ;
             result->mRemoteOverlayMinVersion = helloMsg.overlayMinVersion;
             result->mRemoteOverlayVersion = helloMsg.overlayVersion;
             result->mRemoteVersion = helloMsg.versionStr;
@@ -206,6 +220,8 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
     size_t authRequest_length = authXdrBytes->raw_size();
     //following blocks until the full request has been written to socket
     size_t bytesWriiten = asio::write(basicAsioTcpSocket, asio::buffer(authXdrBytes->raw_data(), authRequest_length));
+    CLOG(INFO, "Overlay") << "== Step 4 in stellar-core peer connection protocol: - sent AUTH msg type including hmac values to peer."
+        ;
 
     //== now read response on connected socket
     std::vector<uint8_t> authRespHttpHdr; //we just want 4 bytes which represents the http response hdr
@@ -242,7 +258,7 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
                         " (note: dropped remote peer)." \
                         "  size of body length {}", authRepBodyLen) );
         }
-        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - the response body length is: " << httpRespBodyLen;
+        //CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - the response body length is: " << httpRespBodyLen;
 
         std::vector<uint8_t> authHttpBody;
         authHttpBody.resize(authRepBodyLen);
@@ -268,6 +284,8 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
             switch(msgType)
             {
                 case MessageType::AUTH: {
+                    CLOG(INFO, "Overlay") << "== Final step in stellar-core peer connection protocol: - remote peer sent AUTH msg type back."
+                        ;
                     stellar::Auth & a = sm.auth();
                     result->mState = GOT_AUTH; //transition state for peer
                     break;                    
@@ -331,7 +349,7 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
                         "  size of body length {}", peersRespBodyLen) );
         }
 
-        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - the peers list response body length is: " << peersRespBodyLen;
+        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received the peers list response, response body length is: " << peersRespBodyLen;
         std::vector<uint8_t> peersListHttpBody;
         peersListHttpBody.resize(peersRespBodyLen);
         try {
@@ -371,7 +389,9 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
                         }
 
                     } else {
-                        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received peers list respose but remote peer is not connected to any stellar node";
+                        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received peers list respose but remote peer is not connected to any stellar node."
+                            << " Is this stellar network a \"star\" network? "
+                        ;
                     }
 
                     break;                    
@@ -450,7 +470,7 @@ TCPPeer::initiateSynch(Application& app, PeerBareAddress const& address)
                         " (note: dropped remote peer)." \
                         "  size of body length {}", scpRepBodyLen) );
         }
-        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - the response body for scp quorum set request length is: " << httpRespBodyLen;        
+        CLOG(INFO, "Overlay") << "TCPPeer::initiateSynch - received the scp quorum set response, the response body for scp quorum set request length is: " << httpRespBodyLen;        
 
         std::vector<uint8_t> scpXdrBody;
         scpXdrBody.resize(scpRepBodyLen);
