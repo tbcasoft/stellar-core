@@ -13,6 +13,11 @@ namespace medida
 class Meter;
 }
 
+namespace platform_stellarpinger
+{
+class ConnectionMgr;
+}
+
 namespace stellar
 {
 
@@ -27,6 +32,9 @@ class TCPPeer : public Peer
     static constexpr size_t BUFSZ = 0x40000; // 256KB
 
   private:
+
+    friend class platform_stellarpinger::ConnectionMgr;
+
     std::shared_ptr<SocketType> mSocket;
     std::vector<uint8_t> mIncomingHeader;
     std::vector<uint8_t> mIncomingBody;
@@ -73,6 +81,7 @@ class TCPPeer : public Peer
                                                  // `initiate` or
                                                  // `accept` instead
 
+    static pointer initiateSynch(Application& app, PeerBareAddress const& address);
     static pointer initiate(Application& app, PeerBareAddress const& address);
     static pointer accept(Application& app, std::shared_ptr<SocketType> socket);
 

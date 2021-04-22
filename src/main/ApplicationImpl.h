@@ -18,6 +18,13 @@ class Counter;
 class Timer;
 }
 
+namespace platform_stellarpinger
+{
+class ConnectionMgr;
+class PingerOverlayManagerStub;
+class ApplicationImplStub;
+}
+
 namespace stellar
 {
 class TmpDirManager;
@@ -122,6 +129,11 @@ class ApplicationImpl : public Application
     std::unique_ptr<Herder> mHerder; // allow to change that for tests
 
   private:
+
+    friend class platform_stellarpinger::ConnectionMgr;
+    friend class platform_stellarpinger::ApplicationImplStub;
+    friend class platform_stellarpinger::PingerOverlayManagerStub;
+
     VirtualClock& mVirtualClock;
     Config mConfig;
 

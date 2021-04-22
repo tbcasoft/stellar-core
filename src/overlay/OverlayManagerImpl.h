@@ -31,6 +31,13 @@ class Meter;
 class Counter;
 }
 
+namespace platform_stellarpinger
+{
+class ConnectionMgr;
+class PingerOverlayManagerStub;
+class ApplicationImplStub;
+}
+
 /*
 Maintain the set of peers we are connected to
 */
@@ -40,6 +47,11 @@ namespace stellar
 class OverlayManagerImpl : public OverlayManager
 {
   protected:
+
+    friend class platform_stellarpinger::ConnectionMgr;
+    friend class platform_stellarpinger::ApplicationImplStub;
+    friend class platform_stellarpinger::PingerOverlayManagerStub;
+
     Application& mApp;
     std::set<PeerBareAddress> mConfigurationPreferredPeers;
 
@@ -170,7 +182,7 @@ class OverlayManagerImpl : public OverlayManager
 
     virtual bool connectToImpl(PeerBareAddress const& address,
                                bool forceoutbound);
-    int connectTo(int maxNum, PeerType peerType);
+    virtual int connectTo(int maxNum, PeerType peerType);
     int connectTo(std::vector<PeerBareAddress> const& peers,
                   bool forceoutbound);
     std::vector<PeerBareAddress> getPeersToConnectTo(int maxNum,
