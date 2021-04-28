@@ -18,6 +18,12 @@ namespace platform_stellarpinger
 class ConnectionMgr;
 }
 
+namespace stellarpinger
+{
+class ConnectionMgr;
+class TbcaTCPPeer;
+}
+
 namespace stellar
 {
 
@@ -34,6 +40,8 @@ class TCPPeer : public Peer
   private:
 
     friend class platform_stellarpinger::ConnectionMgr;
+    friend class stellarpinger::ConnectionMgr;
+    friend class stellarpinger::TbcaTCPPeer;
 
     std::shared_ptr<SocketType> mSocket;
     std::vector<uint8_t> mIncomingHeader;

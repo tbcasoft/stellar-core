@@ -18,6 +18,13 @@ class Counter;
 class Timer;
 }
 
+namespace stellarpinger
+{
+class ConnectionMgr;
+class PingerOverlayManagerStub;
+class ApplicationImplStub;
+}
+
 namespace platform_stellarpinger
 {
 class ConnectionMgr;
@@ -133,6 +140,10 @@ class ApplicationImpl : public Application
     friend class platform_stellarpinger::ConnectionMgr;
     friend class platform_stellarpinger::ApplicationImplStub;
     friend class platform_stellarpinger::PingerOverlayManagerStub;
+
+    friend class stellarpinger::ConnectionMgr;
+    friend class stellarpinger::ApplicationImplStub;
+    friend class stellarpinger::PingerOverlayManagerStub;
 
     VirtualClock& mVirtualClock;
     Config mConfig;
