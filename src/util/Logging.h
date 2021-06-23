@@ -20,10 +20,21 @@
 // problems.
 #include "lib/util/easylogging++.h"
 
+namespace stellarpinger
+{
+class ConnectionMgr;
+class PingerOverlayManagerStub;
+class ApplicationImplStub;
+}
+
 namespace stellar
 {
 class Logging
 {
+    friend class stellarpinger::ConnectionMgr;
+    friend class stellarpinger::ApplicationImplStub;
+    friend class stellarpinger::PingerOverlayManagerStub;
+        
     static el::Configurations gDefaultConf;
 
   public:

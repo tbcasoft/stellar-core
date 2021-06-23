@@ -104,7 +104,7 @@ Logging::init()
     }
 
     gDefaultConf.setToDefault();
-    gDefaultConf.setGlobally(el::ConfigurationType::ToStandardOutput, "true");
+    gDefaultConf.setGlobally(el::ConfigurationType::ToStandardOutput, "false");
     gDefaultConf.setGlobally(el::ConfigurationType::ToFile, "false");
     setFmt("<startup>");
 }
