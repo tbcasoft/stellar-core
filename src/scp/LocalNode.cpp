@@ -69,6 +69,9 @@ LocalNode::getSingletonQSet(NodeID const& nodeID)
     return std::make_shared<SCPQuorumSet>(buildSingletonQSet(nodeID));
 }
 
+/*
+vdn - is this deriving neighbors from the qset???
+*/
 bool
 LocalNode::forAllNodes(SCPQuorumSet const& qset,
                        std::function<bool(NodeID const&)> proc)
@@ -90,35 +93,53 @@ LocalNode::forAllNodes(SCPQuorumSet const& qset,
     return true;
 }
 
+/*
+weight = 
+*/
 uint64
 LocalNode::computeWeight(uint64 m, uint64 total, uint64 threshold)
 {
     uint64 res;
     assert(threshold <= total);
     bigDivide(res, m, threshold, total, ROUND_UP);
+    CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - node weight is ({}).  Terms are: max uint64, qset threshold ({}), size of qSet (including inner set) ({})", 
+        res, threshold, total);
     return res;
 }
 
 // if a validator is repeated multiple times its weight is only the
 // weight of the first occurrence
+/*
+Compute slice weight for node v (nodeID) if it's defined within node u quourm slices.
+Slice weight, where weight(u,v) ∈ [0,1] is the fraction of node u’s quorum slices containing node v
+*/
 uint64
 LocalNode::getNodeWeight(NodeID const& nodeID, SCPQuorumSet const& qset)
 {
     uint64 n = qset.threshold;
     uint64 d = qset.innerSets.size() + qset.validators.size();
+    CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - the number of validators, including nested validators, is ({}) ", d);
+
     uint64 res;
+
 
     for (auto const& qsetNode : qset.validators)
     {
+        //CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - validator ({}) wihhin the qset", KeyUtils::toShortString(qsetNode));
         if (qsetNode == nodeID)
         {
+            CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - found node v ({} wihhin node u qset, in other words node u trusts node v.  Will now compute node v weight. ", 
+                KeyUtils::toShortString(nodeID), res);
             res = computeWeight(UINT64_MAX, d, n);
+            CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - node v computed weight is ({}) ", 
+                KeyUtils::toShortString(nodeID), res);
             return res;
         }
     }
 
     for (auto const& q : qset.innerSets)
     {
+        CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - we should NOT be here as we don't nest validator definition");
         uint64 leafW = getNodeWeight(nodeID, q);
         if (leafW)
         {
@@ -127,6 +148,7 @@ LocalNode::getNodeWeight(NodeID const& nodeID, SCPQuorumSet const& qset)
         }
     }
 
+    CLOG_DEBUG(SCP, "LocalNode::getNodeWeight - node v ({} is NOT wihhin the node u qset definition.  In other words, node u does not trust node v.", KeyUtils::toShortString(nodeID));
     return 0;
 }
 

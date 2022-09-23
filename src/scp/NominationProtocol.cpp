@@ -25,6 +25,7 @@ using namespace std::placeholders;
 NominationProtocol::NominationProtocol(Slot& slot)
     : mSlot(slot), mRoundNumber(0), mNominationStarted(false)
 {
+    CLOG_DEBUG(SCP, "### new NominationProtocol object.  May want to reinitialize timeout now.");
 }
 
 bool
@@ -217,14 +218,36 @@ NominationProtocol::applyAll(SCPNomination const& nom,
     }
 }
 
+/*
+Execute logic to derive the leader(s) to nominate per round.
+*/
 void
 NominationProtocol::updateRoundLeaders()
 {
     ZoneScoped;
     SCPQuorumSet myQSet = mSlot.getLocalNode()->getQuorumSet();
+    if (myQSet.innerSets.size() > 0) {
+        CLOG_DEBUG(SCP, "** This node defines validators in different quality groups.  High quality groups have a nested lower quality group to be used as a backup for the higher quality group");
+        for (xdr::xvector<stellar::PublicKey>::iterator it = myQSet.validators.begin(); it != myQSet.validators.end(); ++it) {
+            auto value = *it;
+            CLOG_DEBUG(SCP, "** Validator within innerset: {}", mSlot.getSCPDriver().toShortString(value));
+        }
+    } else {
+        CLOG_DEBUG(SCP, "** This node qset innerset is empty which means we don't define different quality (high, medium, low) validator groups.");
+    }
+    for (xdr::xvector<stellar::PublicKey>::iterator it = myQSet.validators.begin(); it != myQSet.validators.end(); ++it) {
+        auto value = *it;
+        CLOG_DEBUG(SCP, "** Validator within this node qset: {}", mSlot.getSCPDriver().toShortString(value));
+    }
 
     auto localID = mSlot.getLocalNode()->getNodeID();
     normalizeQSet(myQSet, &localID); // excludes self
+    CLOG_DEBUG(SCP, "** START - After nomralizing my qset, here are now the nodes within my qset: ");
+    for (xdr::xvector<PublicKey>::iterator it = myQSet.validators.begin(); it != myQSet.validators.end(); ++it) {
+        auto value = *it;
+        CLOG_DEBUG(SCP, "validator: {}", mSlot.getSCPDriver().toShortString(value));
+    }
+    CLOG_DEBUG(SCP, "** END - After nomralizing my qset, here are now the nodes within my qset: ");
 
     size_t maxLeaderCount = 1; // includes self
     // note that node IDs here are unique ("sane"), so we can count by
@@ -241,32 +264,44 @@ NominationProtocol::updateRoundLeaders()
 
         newRoundLeaders.insert(localID);
         uint64 topPriority = getNodePriority(localID, myQSet);
+        CLOG_DEBUG(SCP, "** updateRoundLeaders: initializing myself {} to the new leaders set.  My computed priority is {}.  I may get kicked out if other nodes have higher priority."
+            , mSlot.getSCPDriver().toShortString(localID), topPriority);
 
+        CLOG_DEBUG(SCP, "** updateRoundLeaders: start - processing sequentially nodes within qset: deriving neighbors(u) and compute priority for each node.");
         LocalNode::forAllNodes(myQSet, [&](NodeID const& cur) {
             uint64 w = getNodePriority(cur, myQSet);
+            CLOG_DEBUG(SCP, "updateRoundLeaders: node {} has computed priority value of {}.", 
+                    mSlot.getSCPDriver().toShortString(cur), w);
+            
             if (w > topPriority)
             {
+                CLOG_DEBUG(SCP, "updateRoundLeaders: node {} now is the most important with priority value of {}.", 
+                    mSlot.getSCPDriver().toShortString(cur), w);
                 topPriority = w;
                 newRoundLeaders.clear();
             }
             if (w == topPriority && w > 0)
             {
+                CLOG_DEBUG(SCP, "updateRoundLeaders:  adding top priority node {} to new leaders set.",  mSlot.getSCPDriver().toShortString(cur));
                 newRoundLeaders.insert(cur);
             }
             return true;
         });
-        // expand mRoundLeaders with the newly computed leaders
+        CLOG_DEBUG(SCP, "** updateRoundLeaders: end - processing sequentially nodes within qset.");
+
         auto oldSize = mRoundLeaders.size();
-        mRoundLeaders.insert(newRoundLeaders.begin(), newRoundLeaders.end());
+        mRoundLeaders.insert(newRoundLeaders.begin(), newRoundLeaders.end());  // expand mRoundLeaders with the newly computed leaders
+
+        //Following logic is just to print out debug messages
         if (oldSize != mRoundLeaders.size())
         {
             if (Logging::logDebug("SCP"))
             {
-                CLOG_DEBUG(SCP, "updateRoundLeaders: {} -> {}", oldSize,
-                           mRoundLeaders.size());
+                //CLOG_DEBUG(SCP, "updateRoundLeaders: after applying weight to my qset, old size of round leader(s) set {} -> new size {}", oldSize, mRoundLeaders.size());
+                CLOG_DEBUG(SCP, "*** updateRoundLeaders: for this round, here are who I think are the leader(s) (node v ) in the list of MY neighbors (neighbors(u)).");
                 for (auto const& rl : mRoundLeaders)
                 {
-                    CLOG_DEBUG(SCP, "    leader {}",
+                    CLOG_DEBUG(SCP, "    selected leader {}",
                                mSlot.getSCPDriver().toShortString(rl));
                 }
             }
@@ -276,20 +311,27 @@ NominationProtocol::updateRoundLeaders()
         {
             mRoundNumber++;
             CLOG_DEBUG(SCP,
-                       "updateRoundLeaders: fast timeout (would no op) -> {}",
+                       "updateRoundLeaders: the size of potential leaders have not change, fast timeout (would no op) -> {}",
                        mRoundNumber);
         }
     }
     CLOG_DEBUG(SCP, "updateRoundLeaders: nothing to do");
 }
 
+/*
+Used by the nomination protocol to randomize the order of messages between nodes.
+The terms to create the random value include current ledger index, round number, nodeid, and a priority boolean value.
+ */
 uint64
 NominationProtocol::hashNode(bool isPriority, NodeID const& nodeID)
 {
     ZoneScoped;
     dbgAssert(!mPreviousValue.empty());
-    return mSlot.getSCPDriver().computeHashNode(
-        mSlot.getSlotIndex(), mPreviousValue, isPriority, mRoundNumber, nodeID);
+    stellar::uint64  result = mSlot.getSCPDriver().computeHashNode(mSlot.getSlotIndex(), mPreviousValue, isPriority, mRoundNumber, nodeID);
+    CLOG_DEBUG(SCP,
+            "hasNode: computeHashNode result for node ({}) with isPriority ({}) is ({})", mSlot.getSCPDriver().toShortString(nodeID), 
+            isPriority, result);
+    return result;
 }
 
 uint64
@@ -301,33 +343,58 @@ NominationProtocol::hashValue(Value const& value)
         mSlot.getSlotIndex(), mPreviousValue, mRoundNumber, value);
 }
 
+/*
+Within a round, compute the priority for a node.  See comments within method for details.
+Note:  see https://www.scs.stanford.edu/~dm/blog/simplified-scp.html, section "Federated Leader Election"
+for context to "node u" and "node v".
+*/
 uint64
-NominationProtocol::getNodePriority(NodeID const& nodeID,
-                                    SCPQuorumSet const& qset)
+NominationProtocol::getNodePriority(NodeID const& nodeID,  //nodeID is "node v" in white paper
+                                    SCPQuorumSet const& qset) //qset here is node u's quorum set definition
 {
     ZoneScoped;
     uint64 res;
-    uint64 w;
+    uint64 w = UINT64_MAX; //Take away advantage of local node to be elected leader. 
+    CLOG_DEBUG(SCP, "getNodePriority:  NOTE: all nodes set to max value for its weight.");
 
-    if (nodeID == mSlot.getLocalNode()->getNodeID())
+    /**
+    if (nodeID == mSlot.getLocalNode()->getNodeID()) //node v is the local node
     {
         // local node is in all quorum sets
+        // Specifically, node v here is really node u (i.e. )the local node).  One rule in dynamic quorum slices is local node is always in all dynamically created slices.
+        CLOG_DEBUG(SCP, "getNodePriority:  node v({}) is the local node, assigning it max value to weight."
+            , mSlot.getSCPDriver().toShortString(nodeID));
         w = UINT64_MAX;
     }
     else
     {
+        //node v is not local node so will compute its weight.
         w = LocalNode::getNodeWeight(nodeID, qset);
+        CLOG_DEBUG(SCP, "getNodePriority:  computed weight for node v ({}) is ({})"
+            , mSlot.getSCPDriver().toShortString(nodeID), w);
+
     }
+    **/
 
     // if w > 0; w is inclusive here as
     // 0 <= hashNode <= UINT64_MAX
-    if (w > 0 && hashNode(false, nodeID) <= w)
+    /*
+    hasNode() is Used by the nomination protocol to randomize the order of messages between nodes, i.e. randomization of nodes among the qset. 
+    The terms within hasNode() to create the random value include current ledger index, round number, nodeid, and a priority boolean value.
+    
+    * hasNode() does not use node weight in its calculation.  Node weight comes into plan as a boundary in the generated random number.  Specifically, 
+    the randomization number has to be > 0 and <= node weight, if not, randomization value is 0 which eliminates it from
+    being a leader candidate.
+    */
+    if (w > 0 && hashNode(false, nodeID) <= w) //hashNode(false) is H0(v) in whitepaper.
     {
-        res = hashNode(true, nodeID);
+        res = hashNode(true, nodeID); //hasNode(true) is H1(v) and priority(v) = H1(v)
     }
     else
     {
         res = 0;
+        CLOG_DEBUG(SCP, "### getNodePriority:  randomizaed value for node ({}) will be assigned 0.  Reason is  randomized value is either 0 or > weight of node."
+            , mSlot.getSCPDriver().toShortString(nodeID));
     }
     return res;
 }
@@ -494,14 +561,18 @@ NominationProtocol::getStatementValues(SCPStatement const& st)
     return res;
 }
 
-// attempts to nominate a value for consensus
+/*
+ Attempt to nominate one or small number of leaders for this ledger close.
+To accomodate for leader failure, leader selection proceeds through rounds.
+
+ */
 bool
 NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
                              bool timedout)
 {
     ZoneScoped;
-    CLOG_DEBUG(SCP, "NominationProtocol::nominate ({}) {}", mRoundNumber,
-               mSlot.getSCP().getValueString(value->getValue()));
+    CLOG_DEBUG(SCP, "NominationProtocol::nominate - round: ({}), nomination value:  {}", 
+        mRoundNumber, mSlot.getSCP().getValueString(value->getValue()));
 
     bool updated = false;
 
@@ -518,6 +589,17 @@ NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
     mRoundNumber++;
     updateRoundLeaders();
 
+    CLOG_DEBUG(SCP, "** START: NominationProtocol::nominate - after sorting, deriving \"neighbors\", and selecting neighbors with highest priority, here are the leaders for this round.");
+    for (auto roundLeader : mRoundLeaders) {
+        CLOG_DEBUG(SCP, "Node ({})", mSlot.getSCPDriver().toShortString(roundLeader));
+        //CLOG_DEBUG(SCP, "Neighbor node public key: ({})", KeyUtils::toShortString(roundLeader));
+    }
+    CLOG_DEBUG(SCP, "** END: NominationProtocol::nominate - end list of leaders.", mRoundNumber);
+
+    /*
+    If the selected leader appear not be fulfilling their responsibilies, then after a certain time out period nodes proceed
+    to the next round to expand the set of leaders they follow.
+    */
     std::chrono::milliseconds timeout =
         mSlot.getSCPDriver().computeTimeout(mRoundNumber);
 
@@ -528,6 +610,7 @@ NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
         auto ins = mVotes.insert(value);
         if (ins.second)
         {
+            CLOG_DEBUG(SCP, "** NominationProtocol::nominate - found us in the list of potential leaders, nominating self. ");
             updated = true;
             mSlot.getSCPDriver().nominatingValue(mSlot.getSlotIndex(),
                                                  value->getValue());
@@ -543,6 +626,8 @@ NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
                 it->second->getStatement().pledges.nominate());
             if (lnmV)
             {
+                CLOG_DEBUG(SCP, "NominationProtocol::nominate - also nominating node (from our potential leaders set)  {}",
+                 mSlot.getSCPDriver().toShortString(leader));
                 mVotes.insert(lnmV);
                 updated = true;
                 mSlot.getSCPDriver().nominatingValue(mSlot.getSlotIndex(),
@@ -564,7 +649,7 @@ NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
     }
     else
     {
-        CLOG_DEBUG(SCP, "NominationProtocol::nominate (SKIPPED)");
+        CLOG_DEBUG(SCP, "NominationProtocol::nominate nominating value already emitted so no need to emit again (SKIPPED)");
     }
 
     return updated;

@@ -179,6 +179,11 @@ class SCPDriver
     // quorum can exchange 4 messages
     virtual std::chrono::milliseconds computeTimeout(uint32 roundNumber);
 
+    // `computeNominationTimeout` computes a timeout given a round number
+    // the base timeout is 250 ms and incremented using same value for each round. 
+    // Upper bound of 1800 rounds.  *Note: round number is incremented by client.
+    virtual std::chrono::milliseconds computeNominationTimeout(uint32 roundNumber);
+
     // Inform about events happening within the consensus algorithm.
 
     // `valueExternalized` is called at most once per slot when the slot

@@ -138,4 +138,21 @@ SCPDriver::computeTimeout(uint32 roundNumber)
     }
     return std::chrono::seconds(timeoutInSeconds);
 }
+
+std::chrono::milliseconds nominationTimeout = std::chrono::milliseconds(0);
+
+std::chrono::milliseconds
+SCPDriver::computeNominationTimeout(uint32 roundNumber)
+{
+    if (roundNumber > MAX_TIMEOUT_SECONDS)
+    {
+        nominationTimeout = std::chrono::duration_cast<std::chrono::milliseconds> (std::chrono::seconds(MAX_TIMEOUT_SECONDS));
+    }
+    else
+    {
+        nominationTimeout.operator+=(std::chrono::milliseconds(250)); //increment by 250 ms for each round
+    }
+    return nominationTimeout;
+}
+
 }
