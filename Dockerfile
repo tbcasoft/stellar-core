@@ -40,13 +40,17 @@ ARG LIB_VERSION
 # clone repo into WORKDIR
 RUN git clone --depth 1 -b ${LIB_VERSION} git@github.com:tbcasoft/stellar-core.git .
 
-#RUN echo "=== About to run  autogen.sh ==="
-RUN ./autogen.sh
-RUN ./configure
+RUN echo "Setup env variable to use clang instead of g++"
+RUN export CFLAGS="-O3 -g1 -fno-omit-frame-pointer"
+
+RUN echo "=== About to run  autogen.sh ==="
+RUN ./autogen.sh &> autogen.out
+RUN ./configure &> configure.out
 RUN echo "=== About to run  make, output stored in make.output file ==="
 #RUN make clean
 RUN make &> make.output
 
 RUN echo "=== stellar-core built, now to compress the executable using UPX ==="
-RUN apt-get install -y upx
-RUN upx stellar-core
+RUN wget https://github.com/upx/upx/releases/download/v4.0.1/upx-4.0.1-amd64_linux.tar.xz
+RUN tar xvf upx-4.0.1-amd64_linux.tar.xz
+RUN ./upx-4.0.1-amd64_linux/upx stellar-core 
