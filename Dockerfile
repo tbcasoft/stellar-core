@@ -25,7 +25,8 @@ RUN apt-get update
 # C++ toolchain.  A toolchain is a set of tools (such as compiler, linker, and assembler) intended to build your project.
 RUN printf "Y" | apt-get install software-properties-common
 RUN add-apt-repository ppa:ubuntu-toolchain-r/test
-RUN apt-get update    
+RUN apt-get update 
+RUN printf "Y" | apt-get install clang
 
 # Common packages.
 RUN printf "Y" | apt-get install git build-essential pkg-config autoconf dh-autoreconf automake libtool bison flex libpq-dev libunwind-dev parallel
@@ -45,3 +46,7 @@ RUN ./configure
 RUN echo "=== About to run  make, output stored in make.output file ==="
 #RUN make clean
 RUN make &> make.output
+
+RUN echo "=== stellar-core built, now to compress the executable using UPX ==="
+RUN apt-get install -y upx
+RUN upx stellar-core
