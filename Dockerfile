@@ -26,7 +26,6 @@ RUN apt-get update
 RUN printf "Y" | apt-get install software-properties-common
 RUN add-apt-repository ppa:ubuntu-toolchain-r/test
 RUN apt-get update 
-RUN printf "Y" | apt-get install clang
 
 # Common packages.
 RUN printf "Y" | apt-get install git build-essential pkg-config autoconf dh-autoreconf automake libtool bison flex libpq-dev libunwind-dev parallel
@@ -34,6 +33,8 @@ RUN printf "Y" | apt-get install git build-essential pkg-config autoconf dh-auto
 # Clang-format-5.0 - tool used to automatically format c++ code so that other developers don’t need to worry about style issues.  
 # It’s used to format your c++ code before creating a pull request.
 RUN printf "Y" | apt-get install clang-format
+
+RUN printf "Y" | apt-get install clang
 
 WORKDIR /usr/stellar-core
 ARG LIB_VERSION
@@ -50,7 +51,7 @@ RUN echo "=== About to run  make, output stored in make.output file ==="
 #RUN make clean
 RUN make &> make.output
 
-RUN echo "=== stellar-core built, now to compress the executable using UPX ==="
-RUN wget https://github.com/upx/upx/releases/download/v4.0.1/upx-4.0.1-amd64_linux.tar.xz
-RUN tar xvf upx-4.0.1-amd64_linux.tar.xz
-RUN ./upx-4.0.1-amd64_linux/upx stellar-core 
+#RUN echo "=== stellar-core built, now to compress the executable using UPX ==="
+#RUN wget https://github.com/upx/upx/releases/download/v4.0.1/upx-4.0.1-amd64_linux.tar.xz
+#RUN tar xvf upx-4.0.1-amd64_linux.tar.xz
+#RUN ./upx-4.0.1-amd64_linux/upx stellar-core 
