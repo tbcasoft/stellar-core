@@ -75,11 +75,23 @@ class NominationProtocol
     uint64 hashValue(Value const& value);
 
     uint64 getNodePriority(NodeID const& nodeID, SCPQuorumSet const& qset);
+    // updates the set of nodes that have priority over the others.  Node weight
+    // is NOT a constraint for computed priority.
+    uint64 getNodePriorityWithoutWeight(NodeID const& nodeID,
+                                        SCPQuorumSet const& qset);
 
     // returns the highest value that we don't have yet, that we should
     // vote for, extracted from a nomination.
     // returns nullptr if no new value was found
     ValueWrapperPtr getNewValueFromNomination(SCPNomination const& nom);
+
+    /*
+    Amount of time (in millisecs) allow for a leader to behave correctly.  If
+    leader is slow, timeout logic kicks in. Vanilla stellar waits in secs which
+    is too long for our network.
+    */
+    std::chrono::milliseconds leaderNominationTimeoutInMilisec =
+        std::chrono::milliseconds(0);
 
   public:
     static bool isNewerStatement(SCPNomination const& oldst,
@@ -127,9 +139,12 @@ class NominationProtocol
     // or nullptr if not found
     SCPEnvelope const* getLatestMessage(NodeID const& id) const;
 
-  private:
-    // The number of times the timer has expired
-    // Used for the quorum endpoint.
-    int32 mTimerExpCount;
+    /*
+  `computeNominationTimeout` computes a timeout given a round number.  It's base
+  on SCPDriver::computeTimeout()
+  @parm roundNumber - nomination round number
+  */
+    virtual std::chrono::milliseconds
+    computeNominationTimeout(uint32 roundNumber);
 };
 }
