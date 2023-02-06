@@ -4,7 +4,10 @@
 
 #include "util/types.h"
 #include "lib/util/uint128_t.h"
+#include "util/GlobalChecks.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
+#include "xdr/Stellar-ledger-entries.h"
 #include <fmt/format.h>
 
 #include <algorithm>
@@ -44,6 +47,20 @@ LedgerEntryKey(LedgerEntry const& e)
         k.claimableBalance().balanceID = d.claimableBalance().balanceID;
         break;
 
+    case LIQUIDITY_POOL:
+        k.liquidityPool().liquidityPoolID = d.liquidityPool().liquidityPoolID;
+        break;
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+        k.contractData().contractID = d.contractData().contractID;
+        k.contractData().key = d.contractData().key;
+        break;
+    case CONFIG_SETTING:
+        k.configSetting().configSettingID = d.configSetting().configSettingID;
+        break;
+#endif
+
     default:
         abort();
     }
@@ -82,7 +99,7 @@ lessThanXored(Hash const& l, Hash const& r, Hash const& x)
 }
 
 bool
-isString32Valid(std::string const& str)
+isStringValid(std::string const& str)
 {
     auto& loc = std::locale::classic();
     for (auto c : str)
@@ -96,7 +113,34 @@ isString32Valid(std::string const& str)
 }
 
 bool
-isAssetValid(Asset const& cur)
+isPoolShareAssetValid(Asset const& asset, uint32_t ledgerVersion)
+{
+    throw std::runtime_error("ASSET_TYPE_POOL_SHARE is not a valid Asset type");
+}
+
+bool
+isPoolShareAssetValid(TrustLineAsset const& asset, uint32_t ledgerVersion)
+{
+    return protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_18);
+}
+
+bool
+isPoolShareAssetValid(ChangeTrustAsset const& asset, uint32_t ledgerVersion)
+{
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_18))
+    {
+        return false;
+    }
+
+    auto const& cp = asset.liquidityPool().constantProduct();
+    return isAssetValid<Asset>(cp.assetA, ledgerVersion) &&
+           isAssetValid<Asset>(cp.assetB, ledgerVersion) &&
+           cp.assetA < cp.assetB && cp.fee == LIQUIDITY_POOL_FEE_V18;
+}
+
+template <typename T>
+bool
+isAssetValid(T const& cur, uint32_t ledgerVersion)
 {
     if (cur.type() == ASSET_TYPE_NATIVE)
         return true;
@@ -157,16 +201,16 @@ isAssetValid(Asset const& cur)
         }
         return charcount > 4;
     }
+    if (cur.type() == ASSET_TYPE_POOL_SHARE)
+    {
+        return isPoolShareAssetValid(cur, ledgerVersion);
+    }
     return false;
 }
 
-AccountID
-getIssuer(Asset const& asset)
-{
-    return (asset.type() == ASSET_TYPE_CREDIT_ALPHANUM4
-                ? asset.alphaNum4().issuer
-                : asset.alphaNum12().issuer);
-}
+template bool isAssetValid<Asset>(Asset const&, uint32_t);
+template bool isAssetValid<TrustLineAsset>(TrustLineAsset const&, uint32_t);
+template bool isAssetValid<ChangeTrustAsset>(ChangeTrustAsset const&, uint32_t);
 
 bool
 compareAsset(Asset const& first, Asset const& second)
@@ -215,7 +259,7 @@ formatSize(size_t size)
     const std::vector<std::string> suffixes = {"B", "KB", "MB", "GB"};
     double dsize = static_cast<double>(size);
 
-    auto i = 0;
+    size_t i = 0;
     while (dsize >= 1024 && i < suffixes.size() - 1)
     {
         dsize /= 1024;
@@ -228,8 +272,8 @@ formatSize(size_t size)
 bool
 addBalance(int64_t& balance, int64_t delta, int64_t maxBalance)
 {
-    assert(balance >= 0);
-    assert(maxBalance >= 0);
+    releaseAssertOrThrow(balance >= 0);
+    releaseAssertOrThrow(maxBalance >= 0);
 
     if (delta == 0)
     {
@@ -268,20 +312,28 @@ iequals(std::string const& a, std::string const& b)
 bool
 operator>=(Price const& a, Price const& b)
 {
-    uint128_t l(a.n);
-    uint128_t r(a.d);
-    l *= b.d;
-    r *= b.n;
+    releaseAssertOrThrow(a.n >= 0);
+    releaseAssertOrThrow(a.d >= 0);
+    releaseAssertOrThrow(b.n >= 0);
+    releaseAssertOrThrow(b.d >= 0);
+    uint128_t l(static_cast<uint32_t>(a.n));
+    uint128_t r(static_cast<uint32_t>(a.d));
+    l *= static_cast<uint32_t>(b.d);
+    r *= static_cast<uint32_t>(b.n);
     return l >= r;
 }
 
 bool
 operator>(Price const& a, Price const& b)
 {
-    uint128_t l(a.n);
-    uint128_t r(a.d);
-    l *= b.d;
-    r *= b.n;
+    releaseAssertOrThrow(a.n >= 0);
+    releaseAssertOrThrow(a.d >= 0);
+    releaseAssertOrThrow(b.n >= 0);
+    releaseAssertOrThrow(b.d >= 0);
+    uint128_t l(static_cast<uint32_t>(a.n));
+    uint128_t r(static_cast<uint32_t>(a.d));
+    l *= static_cast<uint32_t>(b.d);
+    r *= static_cast<uint32_t>(b.n);
     return l > r;
 }
 

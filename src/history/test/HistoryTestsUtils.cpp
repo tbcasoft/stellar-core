@@ -24,8 +24,6 @@
 #include "util/XDROperators.h"
 #include "work/WorkScheduler.h"
 
-#include <medida/metrics_registry.h>
-
 using namespace stellar;
 using namespace txtest;
 
@@ -301,49 +299,8 @@ TestLedgerChainGenerator::makeLedgerChainFiles(
     return CheckpointEnds(beginRange, last);
 }
 
-CatchupMetrics::CatchupMetrics()
-    : mHistoryArchiveStatesDownloaded{0}
-    , mCheckpointsDownloaded{0}
-    , mLedgersVerified{0}
-    , mLedgerChainsVerificationFailed{0}
-    , mBucketsDownloaded{false}
-    , mBucketsApplied{false}
-    , mTxSetsDownloaded{0}
-    , mTxSetsApplied{0}
-{
-}
-
-CatchupMetrics::CatchupMetrics(
-    uint64_t historyArchiveStatesDownloaded, uint64_t checkpointsDownloaded,
-    uint64_t ledgersVerified, uint64_t ledgerChainsVerificationFailed,
-    uint64_t bucketsDownloaded, uint64_t bucketsApplied,
-    uint64_t txSetsDownloaded, uint64_t txSetsApplied)
-    : mHistoryArchiveStatesDownloaded{historyArchiveStatesDownloaded}
-    , mCheckpointsDownloaded{checkpointsDownloaded}
-    , mLedgersVerified{ledgersVerified}
-    , mLedgerChainsVerificationFailed{ledgerChainsVerificationFailed}
-    , mBucketsDownloaded{bucketsDownloaded}
-    , mBucketsApplied{bucketsApplied}
-    , mTxSetsDownloaded{txSetsDownloaded}
-    , mTxSetsApplied{txSetsApplied}
-{
-}
-
-CatchupMetrics
-operator-(CatchupMetrics const& x, CatchupMetrics const& y)
-{
-    return CatchupMetrics{
-        x.mHistoryArchiveStatesDownloaded - y.mHistoryArchiveStatesDownloaded,
-        x.mCheckpointsDownloaded - y.mCheckpointsDownloaded,
-        x.mLedgersVerified - y.mLedgersVerified,
-        x.mLedgerChainsVerificationFailed - y.mLedgerChainsVerificationFailed,
-        x.mBucketsDownloaded - y.mBucketsDownloaded,
-        x.mBucketsApplied - y.mBucketsApplied,
-        x.mTxSetsDownloaded - y.mTxSetsDownloaded,
-        x.mTxSetsApplied - y.mTxSetsApplied};
-}
-
-CatchupPerformedWork::CatchupPerformedWork(CatchupMetrics const& metrics)
+CatchupPerformedWork::CatchupPerformedWork(
+    CatchupManager::CatchupMetrics const& metrics)
     : mHistoryArchiveStatesDownloaded{metrics.mHistoryArchiveStatesDownloaded}
     , mCheckpointsDownloaded{metrics.mCheckpointsDownloaded}
     , mLedgersVerified{metrics.mLedgersVerified}
@@ -421,8 +378,9 @@ CatchupSimulation::CatchupSimulation(VirtualClock::Mode mode,
     : mClock(mode)
     , mHistoryConfigurator(cg)
     , mCfg(getTestConfig())
-    , mAppPtr(createTestApplication(
-          mClock, mHistoryConfigurator->configure(mCfg, true)))
+    , mAppPtr(createTestApplication(mClock,
+                                    mHistoryConfigurator->configure(mCfg, true),
+                                    /*newDB*/ true, /*startApp*/ false))
     , mApp(*mAppPtr)
 {
     auto dirName = cg->getArchiveDirName();
@@ -452,9 +410,6 @@ void
 CatchupSimulation::generateRandomLedger(uint32_t version)
 {
     auto& lm = mApp.getLedgerManager();
-    TxSetFramePtr txSet =
-        std::make_shared<TxSetFrame>(lm.getLastClosedLedgerHeader().hash);
-
     uint32_t ledgerSeq = lm.getLastClosedLedgerNum() + 1;
     uint64_t minBalance = lm.getLastMinBalance(5);
     uint64_t big = minBalance + ledgerSeq;
@@ -466,39 +421,39 @@ CatchupSimulation::generateRandomLedger(uint32_t version)
     auto bob = TestAccount{mApp, getAccount("bob")};
     auto carol = TestAccount{mApp, getAccount("carol")};
 
+    std::vector<TransactionFrameBasePtr> txs;
     // Root sends to alice every tx, bob every other tx, carol every 4rd tx.
     if (ledgerSeq < 5)
     {
-        txSet->add(root.tx({createAccount(alice, big)}));
-        txSet->add(root.tx({createAccount(bob, big)}));
-        txSet->add(root.tx({createAccount(carol, big)}));
+        txs.push_back(root.tx({createAccount(alice, big)}));
+        txs.push_back(root.tx({createAccount(bob, big)}));
+        txs.push_back(root.tx({createAccount(carol, big)}));
     }
     // Allow an occasional empty ledger
     else if (rand_flip() || rand_flip())
     {
-        txSet->add(root.tx({payment(alice, big)}));
-        txSet->add(root.tx({payment(bob, big)}));
-        txSet->add(root.tx({payment(carol, big)}));
+        txs.push_back(root.tx({payment(alice, big)}));
+        txs.push_back(root.tx({payment(bob, big)}));
+        txs.push_back(root.tx({payment(carol, big)}));
 
         // They all randomly send a little to one another every ledger after #4
         if (rand_flip())
-            txSet->add(alice.tx({payment(bob, small)}));
+            txs.push_back(alice.tx({payment(bob, small)}));
         if (rand_flip())
-            txSet->add(alice.tx({payment(carol, small)}));
+            txs.push_back(alice.tx({payment(carol, small)}));
 
         if (rand_flip())
-            txSet->add(bob.tx({payment(alice, small)}));
+            txs.push_back(bob.tx({payment(alice, small)}));
         if (rand_flip())
-            txSet->add(bob.tx({payment(carol, small)}));
+            txs.push_back(bob.tx({payment(carol, small)}));
 
         if (rand_flip())
-            txSet->add(carol.tx({payment(alice, small)}));
+            txs.push_back(carol.tx({payment(alice, small)}));
         if (rand_flip())
-            txSet->add(carol.tx({payment(bob, small)}));
+            txs.push_back(carol.tx({payment(bob, small)}));
     }
-
-    // Provoke sortForHash and hash-caching:
-    txSet->getContentsHash();
+    TxSetFrameConstPtr txSet =
+        TxSetFrame::makeFromTransactions(txs, mApp, 0, 0);
 
     CLOG_DEBUG(History, "Closing synthetic ledger {} with {} txs (txhash:{})",
                ledgerSeq, txSet->sizeTx(), hexAbbrev(txSet->getContentsHash()));
@@ -546,10 +501,12 @@ CatchupSimulation::generateRandomLedger(uint32_t version)
 }
 
 void
-CatchupSimulation::setProto12UpgradeLedger(uint32_t ledger)
+CatchupSimulation::setUpgradeLedger(uint32_t ledger,
+                                    ProtocolVersion upgradeProtocolVersion)
 {
     REQUIRE(mApp.getLedgerManager().getLastClosedLedgerNum() < ledger);
-    mTestProtocolShadowsRemovedLedgerSeq = ledger;
+    mUpgradeLedgerSeq = ledger;
+    mUpgradeProtocolVersion = upgradeProtocolVersion;
 }
 
 void
@@ -560,10 +517,11 @@ CatchupSimulation::ensureLedgerAvailable(uint32_t targetLedger)
     while (lm.getLastClosedLedgerNum() < targetLedger)
     {
         auto lcl = lm.getLastClosedLedgerNum();
-        if (lcl + 1 == mTestProtocolShadowsRemovedLedgerSeq)
+        if (lcl + 1 == mUpgradeLedgerSeq)
         {
-            // Force proto 12 upgrade
-            generateRandomLedger(Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED);
+            // Force protocol upgrade
+            generateRandomLedger(
+                static_cast<uint32_t>(mUpgradeProtocolVersion));
         }
         else
         {
@@ -709,14 +667,14 @@ CatchupSimulation::catchupOffline(Application::pointer app, uint32_t toLedger,
 {
     CLOG_INFO(History, "starting offline catchup with toLedger={}", toLedger);
 
-    auto startCatchupMetrics = getCatchupMetrics(app);
+    auto startCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
     auto& lm = app->getLedgerManager();
     auto lastLedger = lm.getLastClosedLedgerNum();
     auto mode = extraValidation ? CatchupConfiguration::Mode::OFFLINE_COMPLETE
                                 : CatchupConfiguration::Mode::OFFLINE_BASIC;
     auto catchupConfiguration =
         CatchupConfiguration{toLedger, app->getConfig().CATCHUP_RECENT, mode};
-    lm.startCatchup(catchupConfiguration, nullptr);
+    lm.startCatchup(catchupConfiguration, nullptr, {});
     REQUIRE(!app->getClock().getIOContext().stopped());
 
     auto& cm = app->getCatchupManager();
@@ -735,7 +693,7 @@ CatchupSimulation::catchupOffline(Application::pointer app, uint32_t toLedger,
     {
         CLOG_INFO(History, "Caught up");
 
-        auto endCatchupMetrics = getCatchupMetrics(app);
+        auto endCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
         auto catchupPerformedWork =
             CatchupPerformedWork{endCatchupMetrics - startCatchupMetrics};
 
@@ -759,7 +717,7 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
                                  std::vector<uint32_t> const& ledgersToInject)
 {
     auto& lm = app->getLedgerManager();
-    auto startCatchupMetrics = getCatchupMetrics(app);
+    auto startCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
 
     auto& hm = app->getHistoryManager();
     auto& herder = static_cast<HerderImpl&>(app->getHerder());
@@ -855,7 +813,7 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
         REQUIRE(lm.getLastClosedLedgerNum() ==
                 triggerLedger + bufferLedgers + 1);
 
-        auto endCatchupMetrics = getCatchupMetrics(app);
+        auto endCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
         auto catchupPerformedWork =
             CatchupPerformedWork{endCatchupMetrics - startCatchupMetrics};
 
@@ -883,10 +841,8 @@ CatchupSimulation::externalizeLedger(HerderImpl& herder, uint32_t ledger)
               "force-externalizing LedgerCloseData for {} has txhash:{}",
               ledger, hexAbbrev(lcd.getTxSet()->getContentsHash()));
 
-    auto txSet = std::static_pointer_cast<TxSetFrame>(lcd.getTxSet());
-
     herder.getPendingEnvelopes().putTxSet(lcd.getTxSet()->getContentsHash(),
-                                          lcd.getLedgerSeq(), txSet);
+                                          lcd.getLedgerSeq(), lcd.getTxSet());
     herder.getHerderSCPDriver().valueExternalized(
         lcd.getLedgerSeq(), xdr::xdr_to_opaque(lcd.getValue()));
 }
@@ -990,58 +946,6 @@ CatchupSimulation::validateCatchup(Application::pointer app)
     CHECK(haveAliceSeq == wantAliceSeq);
     CHECK(haveBobSeq == wantBobSeq);
     CHECK(haveCarolSeq == wantCarolSeq);
-}
-
-CatchupMetrics
-CatchupSimulation::getCatchupMetrics(Application::pointer app)
-{
-    auto& getHistoryArchiveStateSuccess = app->getMetrics().NewMeter(
-        {"history", "download-history-archive-state", "success"}, "event");
-    auto historyArchiveStatesDownloaded = getHistoryArchiveStateSuccess.count();
-
-    // metric here is tracking checkpoints, not ledgers
-    auto& checkpointsDownloadSuccess = app->getMetrics().NewMeter(
-        {"history", "download-ledger", "success"}, "event");
-
-    auto checkpointsDownloaded = checkpointsDownloadSuccess.count();
-
-    auto& verifyLedgerSuccess = app->getMetrics().NewMeter(
-        {"history", "verify-ledger", "success"}, "event");
-    auto& verifyLedgerChainFailure = app->getMetrics().NewMeter(
-        {"history", "verify-ledger-chain", "failure"}, "event");
-
-    auto ledgersVerified = verifyLedgerSuccess.count();
-    auto ledgerChainsVerificationFailed = verifyLedgerChainFailure.count();
-
-    auto& downloadBucketSuccess = app->getMetrics().NewMeter(
-        {"history", "download-bucket", "success"}, "event");
-
-    auto bucketsDownloaded = downloadBucketSuccess.count();
-
-    auto& bucketApplySuccess = app->getMetrics().NewMeter(
-        {"history", "bucket-apply", "success"}, "event");
-
-    auto bucketsApplied = bucketApplySuccess.count();
-
-    // metric tracks transaction sets for each ledger
-    auto& downloadTxSetsSuccess = app->getMetrics().NewMeter(
-        {"history", "download-transactions", "success"}, "event");
-
-    auto txSetsDownloaded = downloadTxSetsSuccess.count();
-
-    auto& applyLedgerSuccess = app->getMetrics().NewMeter(
-        {"history", "apply-ledger-chain", "success"}, "event");
-
-    auto txSetsApplied = applyLedgerSuccess.count();
-
-    return CatchupMetrics{historyArchiveStatesDownloaded,
-                          checkpointsDownloaded,
-                          ledgersVerified,
-                          ledgerChainsVerificationFailed,
-                          bucketsDownloaded,
-                          bucketsApplied,
-                          txSetsDownloaded,
-                          txSetsApplied};
 }
 
 CatchupPerformedWork

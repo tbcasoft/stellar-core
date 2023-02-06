@@ -7,6 +7,9 @@
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
 #include "transactions/TransactionUtils.h"
+#include "util/GlobalChecks.h"
+#include "util/ProtocolVersion.h"
+#include "xdr/Stellar-ledger-entries.h"
 #include "xdrpp/printer.h"
 #include <fmt/format.h>
 
@@ -43,8 +46,9 @@ LedgerEntryIsValid::checkOnOperationApply(Operation const& operation,
     uint32_t currLedgerSeq = ltxDelta.header.current.ledgerSeq;
     if (currLedgerSeq > INT32_MAX)
     {
-        return fmt::format("LedgerHeader ledgerSeq ({}) exceeds limits ({})",
-                           currLedgerSeq, INT32_MAX);
+        return fmt::format(
+            FMT_STRING("LedgerHeader ledgerSeq ({:d}) exceeds limits ({:d})"),
+            currLedgerSeq, INT32_MAX);
     }
 
     auto ver = ltxDelta.header.current.ledgerVersion;
@@ -86,12 +90,14 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
 {
     if (le.lastModifiedLedgerSeq != ledgerSeq)
     {
-        return fmt::format("LedgerEntry lastModifiedLedgerSeq ({}) does not"
-                           " equal LedgerHeader ledgerSeq ({})",
-                           le.lastModifiedLedgerSeq, ledgerSeq);
+        return fmt::format(
+            FMT_STRING("LedgerEntry lastModifiedLedgerSeq ({:d}) does not"
+                       " equal LedgerHeader ledgerSeq ({:d})"),
+            le.lastModifiedLedgerSeq, ledgerSeq);
     }
 
-    if (version < 14 && le.ext.v() == 1)
+    if (protocolVersionIsBefore(version, ProtocolVersion::V_14) &&
+        le.ext.v() == 1)
     {
         return "LedgerEntry has v1 extension before protocol version 14";
     }
@@ -107,7 +113,23 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
     case DATA:
         return checkIsValid(le.data.data(), version);
     case CLAIMABLE_BALANCE:
-        return checkIsValid(le, previous, version);
+        if (le.ext.v() != 1 || !le.ext.v1().sponsoringID)
+        {
+            return "ClaimableBalance is not sponsored";
+        }
+        return checkIsValid(le.data.claimableBalance(), previous, version);
+    case LIQUIDITY_POOL:
+        if (le.ext.v() != 0)
+        {
+            return "LiquidityPool is sponsored";
+        }
+        return checkIsValid(le.data.liquidityPool(), previous, version);
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+        return checkIsValid(le.data.contractData(), previous, version);
+    case CONFIG_SETTING:
+        return checkIsValid(le.data.configSetting(), previous, version);
+#endif
     default:
         return "LedgerEntry has invalid type";
     }
@@ -118,16 +140,19 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
 {
     if (ae.balance < 0)
     {
-        return fmt::format("Account balance ({}) is negative", ae.balance);
+        return fmt::format(FMT_STRING("Account balance ({:d}) is negative"),
+                           ae.balance);
     }
     if (ae.seqNum < 0)
     {
-        return fmt::format("Account seqNum ({}) is negative", ae.seqNum);
+        return fmt::format(FMT_STRING("Account seqNum ({:d}) is negative"),
+                           ae.seqNum);
     }
     if (ae.numSubEntries > INT32_MAX)
     {
-        return fmt::format("Account numSubEntries ({}) exceeds limit ({})",
-                           ae.numSubEntries, INT32_MAX);
+        return fmt::format(
+            FMT_STRING("Account numSubEntries ({:d}) exceeds limit ({:d})"),
+            ae.numSubEntries, INT32_MAX);
     }
 
     if (!accountFlagIsValid(ae.flags, version))
@@ -135,7 +160,7 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
         return "Account flags are invalid";
     }
 
-    if (!isString32Valid(ae.homeDomain))
+    if (!isStringValid(ae.homeDomain))
     {
         return "Account homeDomain is invalid";
     }
@@ -146,7 +171,7 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
     {
         return "Account signers are not strictly increasing";
     }
-    if (version > 9)
+    if (protocolVersionStartsFrom(version, ProtocolVersion::V_10))
     {
         if (!std::all_of(ae.signers.begin(), ae.signers.end(),
                          [](Signer const& s) {
@@ -159,7 +184,7 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
 
     if (hasAccountEntryExtV2(ae))
     {
-        if (version < 14)
+        if (protocolVersionIsBefore(version, ProtocolVersion::V_14))
         {
             return "Account has v2 extension before protocol version 14";
         }
@@ -167,6 +192,12 @@ LedgerEntryIsValid::checkIsValid(AccountEntry const& ae, uint32 version) const
         if (ae.signers.size() != extV2.signerSponsoringIDs.size())
         {
             return "Account signers not paired with signerSponsoringIDs";
+        }
+
+        if (protocolVersionStartsFrom(version, ProtocolVersion::V_18) &&
+            ae.numSubEntries > UINT32_MAX - extV2.numSponsoring)
+        {
+            return "Account numSubEntries + numSponsoring is > UINT32_MAX";
         }
     }
     return {};
@@ -181,22 +212,42 @@ LedgerEntryIsValid::checkIsValid(TrustLineEntry const& tl,
     {
         return "TrustLine asset is native";
     }
-    if (!isAssetValid(tl.asset))
+    if (!isAssetValid(tl.asset, version))
     {
         return "TrustLine asset is invalid";
     }
+    if (tl.asset.type() == ASSET_TYPE_POOL_SHARE && tl.ext.v() == 1 &&
+        (tl.ext.v1().liabilities.buying != 0 ||
+         tl.ext.v1().liabilities.selling != 0))
+    {
+        return "Pool share TrustLine has liabilities";
+    }
+    if (hasTrustLineEntryExtV2(tl))
+    {
+        if (protocolVersionIsBefore(version, ProtocolVersion::V_18))
+        {
+            return "TrustLine has v2 extension before protocol version 18";
+        }
+        if (tl.ext.v1().ext.v2().liquidityPoolUseCount < 0)
+        {
+            return "TrustLine liquidityPoolUseCount is negative";
+        }
+    }
     if (tl.balance < 0)
     {
-        return fmt::format("TrustLine balance ({}) is negative", tl.balance);
+        return fmt::format(FMT_STRING("TrustLine balance ({:d}) is negative"),
+                           tl.balance);
     }
     if (tl.limit <= 0)
     {
-        return fmt::format("TrustLine limit ({}) is not positive", tl.limit);
+        return fmt::format(FMT_STRING("TrustLine limit ({:d}) is not positive"),
+                           tl.limit);
     }
     if (tl.balance > tl.limit)
     {
-        return fmt::format("TrustLine balance ({}) exceeds limit ({})",
-                           tl.balance, tl.limit);
+        return fmt::format(
+            FMT_STRING("TrustLine balance ({:d}) exceeds limit ({:d})"),
+            tl.balance, tl.limit);
     }
     if (!trustLineFlagIsValid(tl.flags, version))
     {
@@ -215,13 +266,14 @@ LedgerEntryIsValid::checkIsValid(OfferEntry const& oe, uint32 version) const
 {
     if (oe.offerID <= 0)
     {
-        return fmt::format("Offer offerID ({}) must be positive", oe.offerID);
+        return fmt::format(FMT_STRING("Offer offerID ({:d}) must be positive"),
+                           oe.offerID);
     }
-    if (!isAssetValid(oe.selling))
+    if (!isAssetValid(oe.selling, version))
     {
         return "Offer selling asset is invalid";
     }
-    if (!isAssetValid(oe.buying))
+    if (!isAssetValid(oe.buying, version))
     {
         return "Offer buying asset is invalid";
     }
@@ -231,8 +283,8 @@ LedgerEntryIsValid::checkIsValid(OfferEntry const& oe, uint32 version) const
     }
     if (oe.price.n <= 0 || oe.price.d < 1)
     {
-        return fmt::format("Offer price ({} / {}) is invalid", oe.price.n,
-                           oe.price.d);
+        return fmt::format(FMT_STRING("Offer price ({:d} / {:d}) is invalid"),
+                           oe.price.n, oe.price.d);
     }
     if ((oe.flags & ~MASK_OFFERENTRY_FLAGS) != 0)
     {
@@ -248,7 +300,7 @@ LedgerEntryIsValid::checkIsValid(DataEntry const& de, uint32 version) const
     {
         return "Data dataName is empty";
     }
-    if (!isString32Valid(de.dataName))
+    if (!isStringValid(de.dataName))
     {
         return "Data dataName is invalid";
     }
@@ -308,22 +360,17 @@ LedgerEntryIsValid::validatePredicate(ClaimPredicate const& pred,
 }
 
 std::string
-LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
+LedgerEntryIsValid::checkIsValid(ClaimableBalanceEntry const& cbe,
                                  LedgerEntry const* previous,
                                  uint32 version) const
 {
-    if (le.ext.v() != 1 || !le.ext.v1().sponsoringID)
-    {
-        return "ClaimableBalance is not sponsored";
-    }
-
-    auto const& cbe = le.data.claimableBalance();
-    if (version < 17 && cbe.ext.v() == 1)
+    if (protocolVersionIsBefore(version, ProtocolVersion::V_17) &&
+        cbe.ext.v() == 1)
     {
         return "ClaimableBalance has v1 extension before protocol version 17";
     }
 
-    if (isClawbackEnabledOnClaimableBalance(le) &&
+    if (isClawbackEnabledOnClaimableBalance(cbe) &&
         cbe.asset.type() == ASSET_TYPE_NATIVE)
     {
         return "ClaimableBalance clawback set on native balance";
@@ -336,7 +383,7 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
 
     if (previous)
     {
-        assert(previous->data.type() == CLAIMABLE_BALANCE);
+        releaseAssert(previous->data.type() == CLAIMABLE_BALANCE);
         auto const& previousCbe = previous->data.claimableBalance();
 
         if (!(cbe == previousCbe))
@@ -349,7 +396,7 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
     {
         return "ClaimableBalance claimants is empty";
     }
-    if (!isAssetValid(cbe.asset))
+    if (!isAssetValid(cbe.asset, version))
     {
         return "ClaimableBalance asset is invalid";
     }
@@ -368,4 +415,94 @@ LedgerEntryIsValid::checkIsValid(LedgerEntry const& le,
 
     return {};
 }
+
+std::string
+LedgerEntryIsValid::checkIsValid(LiquidityPoolEntry const& lp,
+                                 LedgerEntry const* previous,
+                                 uint32 version) const
+{
+    if (protocolVersionIsBefore(version, ProtocolVersion::V_18))
+    {
+        return "LiquidityPools are only valid from V18";
+    }
+
+    if (lp.body.type() != LIQUIDITY_POOL_CONSTANT_PRODUCT)
+    {
+        return "LiquidityPool type must be constant product";
+    }
+
+    auto const& cp = lp.body.constantProduct();
+    if (!isAssetValid(cp.params.assetA, version))
+    {
+        return "LiquidityPool assetA is invalid";
+    }
+    if (!isAssetValid(cp.params.assetB, version))
+    {
+        return "LiquidityPool assetB is invalid";
+    }
+    if (!(cp.params.assetA < cp.params.assetB))
+    {
+        return "LiquidityPool assets are in an invalid order";
+    }
+    if (cp.params.fee != 30)
+    {
+        return "LiquidityPool fee is not 30 basis points";
+    }
+
+    if (cp.reserveA < 0)
+    {
+        return "LiquidityPool reserveA is negative";
+    }
+    if (cp.reserveB < 0)
+    {
+        return "LiquidityPool reserveB is negative";
+    }
+    if (cp.totalPoolShares < 0)
+    {
+        return "LiquidityPool totalPoolShares is negative";
+    }
+    if (cp.poolSharesTrustLineCount < 0)
+    {
+        return "LiquidityPool poolSharesTrustLineCount is negative";
+    }
+
+    if (previous)
+    {
+        if (previous->data.type() != LIQUIDITY_POOL)
+        {
+            return "LiquidityPool used to be of different type";
+        }
+
+        auto const& lpPrev = previous->data.liquidityPool();
+        if (lpPrev.body.type() != lp.body.type())
+        {
+            return "LiquidityPool body changed type";
+        }
+
+        if (!(lpPrev.body.constantProduct().params ==
+              lp.body.constantProduct().params))
+        {
+            return "LiquidityPool parameters changed";
+        }
+    }
+
+    return {};
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+std::string
+LedgerEntryIsValid::checkIsValid(ContractDataEntry const& cde,
+                                 LedgerEntry const* previous,
+                                 uint32 version) const
+{
+    return {};
+}
+std::string
+LedgerEntryIsValid::checkIsValid(ConfigSettingEntry const& cfg,
+                                 LedgerEntry const* previous,
+                                 uint32 version) const
+{
+    return {};
+}
+#endif
 }

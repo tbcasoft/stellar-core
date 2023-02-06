@@ -4,13 +4,35 @@
 * try Settings -> System -> About and look under System Type
 * When in doubt, see http://www.tenforums.com/tutorials/4399-system-type-32-bit-x86-64-bit-x64-windows-10-a.html
 
-## Download and install `Visual Studio 2019` (for Visual C++) ; the Community Edition is free and fully functional.
+## Download and install `Visual Studio 2022` (for Visual C++) ; the Community Edition is free and fully functional.
 * See https://www.visualstudio.com/downloads/
 * When installing, you will need to select:
     * Desktop Development with C++
     * C++ Profiling (optional)
     * Windows 10 SDK
     * C++/CLI Support
+
+# Configure Git
+
+Some functionality depends on Linux file endings, as such you need to configure git with:
+```
+[core]
+        eol = lf
+        autocrlf = input
+```
+NB: if you change this setting in an existing working folder, you need to reset it to have the proper line ending.
+This can be done with the following sequence:
+```
+git checkout-index --force --all
+git rm --cached -r .
+git reset --hard
+```
+
+## Download and install rust
+
+Easiest is to use rustup, found on [rust-lang.org](https://www.rust-lang.org/tools/install).
+
+Install the x64 MSVC toolchain (`stable-x86_64-pc-windows-msvc`), and make sure that `rustc.exe` is in your `PATH`.
 
 ## Download and install PostgreSQL
 
@@ -72,8 +94,8 @@ If you do not have cURL installed
 ## clang-format
 
 For making changes to the code, you should install the clang-format tool and Visual Studio extension, you can find both at http://llvm.org/builds/
-* note that the version of clang-format used currently is 8.0 (other versions may not format the same way).
-* we recommend downloading 8.0 from http://releases.llvm.org/download.html
+* note that the version of clang-format used currently is 10.0 (other versions may not format the same way).
+* we recommend downloading 10.0 from http://releases.llvm.org/download.html
 
 # Build on Windows using the Windows Subsystem for Linux
 To setup the subsystem, go to https://msdn.microsoft.com/en-us/commandline/wsl/install_guide

@@ -123,7 +123,7 @@ VirtualClock::to_time_t(system_time_point point)
 time_t
 timegm(struct tm* tm)
 {
-    // Timezone independant version
+    // Timezone independent version
     return _mkgmtime(tm);
 }
 #endif
@@ -179,7 +179,7 @@ VirtualClock::tmToISOString(std::tm const& tm)
 {
     char buf[sizeof("0000-00-00T00:00:00Z")];
     size_t conv = strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-    assert(conv == (sizeof(buf) - 1));
+    releaseAssert(conv == (sizeof(buf) - 1));
     return std::string(buf);
 }
 
@@ -256,9 +256,33 @@ VirtualClock::cancelAllEvents()
 }
 
 void
+VirtualClock::shutdown()
+{
+    if (!isStopped())
+    {
+        // Drain all events; things are shutting down.
+        while (cancelAllEvents())
+            ;
+
+        getIOContext().stop();
+
+        // Clear pending queue for the scheduler
+        {
+            std::lock_guard<std::mutex> guard(mPendingActionQueueMutex);
+            mPendingActionQueue =
+                std::queue<std::tuple<std::function<void()>, std::string,
+                                      Scheduler::ActionType>>();
+        }
+
+        // Clear scheduler queues
+        mActionScheduler->shutdown();
+    }
+}
+
+void
 VirtualClock::setCurrentVirtualTime(time_point t)
 {
-    assert(mMode == VIRTUAL_TIME);
+    releaseAssert(mMode == VIRTUAL_TIME);
     // Maintain monotonicity in VIRTUAL_TIME mode.
     releaseAssert(t >= mVirtualNow);
     mVirtualNow = t;
@@ -300,6 +324,12 @@ VirtualClock::shouldYield() const
     }
 }
 
+bool
+VirtualClock::isStopped()
+{
+    return getIOContext().stopped();
+}
+
 static size_t
 crankStep(VirtualClock& clock, std::function<size_t()> step, size_t divisor = 1)
 {
@@ -328,8 +358,6 @@ VirtualClock::crank(bool block)
     }
     size_t progressCount = 0;
     {
-        std::lock_guard<std::recursive_mutex> lock(mDispatchingMutex);
-        mDispatching = true;
         mLastDispatchStart = now();
         nRealTimerCancelEvents = 0;
         if (mMode == REAL_TIME)
@@ -373,9 +401,23 @@ VirtualClock::crank(bool block)
             // skip time forward, dispatching all timers at the next time-step.
             progressCount += advanceToNext();
         }
-        mDispatching = false;
     }
-    // At this point main and background threads can add work to next crank.
+
+    // Transfer any pending actions to the scheduler, counting them as
+    // "progress" also.
+    {
+        std::lock_guard<std::mutex> guard(mPendingActionQueueMutex);
+        while (!mPendingActionQueue.empty())
+        {
+            auto& f = mPendingActionQueue.front();
+            mActionScheduler->enqueue(std::move(std::get<1>(f)),
+                                      std::move(std::get<0>(f)),
+                                      std::get<2>(f));
+            mPendingActionQueue.pop();
+            progressCount++;
+        }
+    }
+
     if (block && progressCount == 0)
     {
         ZoneNamedN(blockingZone, "ASIO blocking", true);
@@ -389,25 +431,50 @@ void
 VirtualClock::postAction(std::function<void()>&& f, std::string&& name,
                          Scheduler::ActionType type)
 {
-    std::lock_guard<std::recursive_mutex> lock(mDispatchingMutex);
-    if (!mDispatching)
+    if (isStopped())
     {
-        // Either we are waiting on io_context().run_one, or by some chance
-        // run_one was woken up by network activity and postAction was
-        // called from a background thread.
+        return;
+    }
 
-        // In any case, all we need to do is ensure that we wake up `crank`, we
-        // do this by posting an empty event to the main IO queue
-        mDispatching = true;
+    bool queueWasEmpty = false;
+    {
+        std::lock_guard<std::mutex> lock(mPendingActionQueueMutex);
+        queueWasEmpty = mPendingActionQueue.empty();
+        mPendingActionQueue.emplace(std::move(f), std::move(name), type);
+    }
+
+    // The pending queue is emptied by the main thread just before the main
+    // thread potentially blocks waiting for real IO events, on a call to
+    // mIOContext.run_one. It is possible that the main thread saw an empty
+    // pending queue just before we (say, a background thread) enqueued some
+    // work in this call to postAction. In this case, the main thread would
+    // potentially never wake up and notice the enqueued work: we enqueued after
+    // it checked.
+    //
+    // However, if the main thread observed an empty pending queue, we would
+    // also have observed it here (we never dequeue work here) and so we treat
+    // as a special case enqueueing on the empty->nonempty case, and inject an
+    // artificial "IO event" in the mIOContext, so ensure the main thread wakes
+    // up after our enqueue.
+    //
+    // If we inject this at any point in the main thread's crank cycle other
+    // than the brief window between it emptying the pending queue and doing a
+    // blocking mIOContext.run_one call, it's pointless but also harmless.
+    if (queueWasEmpty)
+    {
         asio::post(mIOContext, []() {});
     }
-    mActionScheduler->enqueue(std::move(name), std::move(f), type);
 }
 
 size_t
 VirtualClock::getActionQueueSize() const
 {
-    return mActionScheduler->size();
+    size_t pending = 0;
+    {
+        std::lock_guard<std::mutex> guard(mPendingActionQueueMutex);
+        pending = mPendingActionQueue.size();
+    }
+    return pending + mActionScheduler->size();
 }
 
 bool
@@ -471,7 +538,7 @@ VirtualClock::advanceToNext()
     {
         return 0;
     }
-    assert(mMode == VIRTUAL_TIME);
+    releaseAssert(mMode == VIRTUAL_TIME);
     assertThreadIsMain();
     if (mEvents.empty())
     {
@@ -601,9 +668,14 @@ VirtualTimer::expires_from_now(VirtualClock::duration d)
 void
 VirtualTimer::async_wait(function<void(asio::error_code)> const& fn)
 {
+    if (mClock.isStopped())
+    {
+        return;
+    }
+
     if (!mCancelled)
     {
-        assert(!mDeleting);
+        releaseAssert(!mDeleting);
         auto ve = make_shared<VirtualClockEvent>(mExpiryTime, seq(), fn);
         mClock.enqueue(ve);
         mEvents.push_back(ve);
@@ -614,9 +686,13 @@ void
 VirtualTimer::async_wait(std::function<void()> const& onSuccess,
                          std::function<void(asio::error_code)> const& onFailure)
 {
+    if (mClock.isStopped())
+    {
+        return;
+    }
     if (!mCancelled)
     {
-        assert(!mDeleting);
+        releaseAssert(!mDeleting);
         auto ve = make_shared<VirtualClockEvent>(
             mExpiryTime, seq(), [onSuccess, onFailure](asio::error_code error) {
                 if (error)

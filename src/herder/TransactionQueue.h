@@ -5,7 +5,9 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "crypto/SecretKey.h"
+#include "herder/TxQueueLimiter.h"
 #include "herder/TxSetFrame.h"
+#include "ledger/LedgerTxn.h"
 #include "transactions/TransactionFrame.h"
 #include "util/HashOfHash.h"
 #include "util/Timer.h"
@@ -29,7 +31,6 @@ namespace stellar
 {
 
 class Application;
-class TxQueueLimiter;
 
 /**
  * TransactionQueue keeps received transactions that are valid and have not yet
@@ -59,7 +60,7 @@ class TxQueueLimiter;
 class TransactionQueue
 {
   public:
-    static int64_t const FEE_MULTIPLIER;
+    static uint64_t const FEE_MULTIPLIER;
 
     enum class AddResult
     {
@@ -105,6 +106,7 @@ class TransactionQueue
         TransactionFrameBasePtr mTx;
         bool mBroadcasted;
         VirtualClock::time_point mInsertionTime;
+        bool mSubmittedFromSelf;
     };
     using TimestampedTransactions = std::vector<TimestampedTx>;
     using Transactions = std::vector<TransactionFrameBasePtr>;
@@ -121,7 +123,10 @@ class TransactionQueue
                               uint32 banDepth, uint32 poolLedgerMultiplier);
     ~TransactionQueue();
 
-    AddResult tryAdd(TransactionFrameBasePtr tx);
+    static std::vector<AssetPair>
+    findAllAssetPairsInvolvedInPaymentLoops(TransactionFrameBasePtr tx);
+
+    AddResult tryAdd(TransactionFrameBasePtr tx, bool submittedFromSelf);
     void removeApplied(Transactions const& txs);
     void ban(Transactions const& txs);
 
@@ -135,11 +140,11 @@ class TransactionQueue
     AccountTxQueueInfo
     getAccountTransactionQueueInfo(AccountID const& accountID) const;
 
-    int countBanned(int index) const;
+    size_t countBanned(int index) const;
     bool isBanned(Hash const& hash) const;
+    TransactionFrameBaseConstPtr getTx(Hash const& hash) const;
 
-    std::shared_ptr<TxSetFrame>
-    toTxSet(LedgerHeaderHistoryEntry const& lcl) const;
+    TxSetFrame::Transactions getTransactions(LedgerHeader const& lcl) const;
 
     struct ReplacedTransaction
     {
@@ -152,6 +157,7 @@ class TransactionQueue
     void rebroadcast();
 
     void shutdown();
+    size_t getMaxQueueSizeOps() const;
 
   private:
     /**
@@ -179,24 +185,34 @@ class TransactionQueue
     // counters
     std::vector<medida::Counter*> mSizeByAge;
     medida::Counter& mBannedTransactionsCounter;
+    medida::Counter& mArbTxSeenCounter;
+    medida::Counter& mArbTxDroppedCounter;
     medida::Timer& mTransactionsDelay;
+    medida::Timer& mTransactionsSelfDelay;
 
     UnorderedSet<OperationType> mFilteredTypes;
 
     bool mShutdown{false};
     bool mWaiting{false};
-    size_t mBroadcastOpCarryover{0};
+    uint32_t mBroadcastOpCarryover = 0;
     VirtualTimer mBroadcastTimer;
 
-    size_t getMaxOpsToFloodThisPeriod() const;
+    uint32_t getMaxOpsToFloodThisPeriod() const;
     bool broadcastSome();
     void broadcast(bool fromCallback);
     // broadcasts a single transaction
-    bool broadcastTx(AccountState& state, TimestampedTx& tx);
+    enum class BroadcastStatus
+    {
+        BROADCAST_STATUS_ALREADY,
+        BROADCAST_STATUS_SUCCESS,
+        BROADCAST_STATUS_SKIPPED
+    };
+    BroadcastStatus broadcastTx(AccountState& state, TimestampedTx& tx);
 
     AddResult canAdd(TransactionFrameBasePtr tx,
                      AccountStates::iterator& stateIter,
-                     TimestampedTransactions::iterator& oldTxIter);
+                     TimestampedTransactions::iterator& oldTxIter,
+                     std::vector<TxStackPtr>& txsToEvict);
 
     void releaseFeeMaybeEraseAccountState(TransactionFrameBasePtr tx);
 
@@ -210,10 +226,13 @@ class TransactionQueue
     bool isFiltered(TransactionFrameBasePtr tx) const;
 
     std::unique_ptr<TxQueueLimiter> mTxQueueLimiter;
+    UnorderedMap<AssetPair, uint32_t, AssetPairHash> mArbitrageFloodDamping;
+
+    UnorderedMap<Hash, TransactionFrameBasePtr> mKnownTxHashes;
 
     size_t mBroadcastSeed;
 
-    friend struct TxQueueTracker;
+    friend class TxQueueTracker;
 
 #ifdef BUILD_TESTS
   public:
@@ -222,7 +241,9 @@ class TransactionQueue
 #endif
 };
 
-static const char* TX_STATUS_STRING[static_cast<int>(
-    TransactionQueue::AddResult::ADD_STATUS_COUNT)] = {
-    "PENDING", "DUPLICATE", "ERROR", "TRY_AGAIN_LATER", "FILTERED"};
+extern std::array<const char*,
+                  static_cast<int>(
+                      TransactionQueue::AddResult::ADD_STATUS_COUNT)>
+    TX_STATUS_STRING;
+
 }

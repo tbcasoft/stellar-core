@@ -3,9 +3,11 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "historywork/GetAndUnzipRemoteFileWork.h"
+#include "catchup/CatchupManager.h"
 #include "history/HistoryArchive.h"
 #include "historywork/GetRemoteFileWork.h"
 #include "historywork/GunzipFileWork.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include <Tracy.hpp>
 #include <fmt/format.h>
@@ -15,17 +17,11 @@ namespace stellar
 
 GetAndUnzipRemoteFileWork::GetAndUnzipRemoteFileWork(
     Application& app, FileTransferInfo ft,
-    std::shared_ptr<HistoryArchive> archive)
+    std::shared_ptr<HistoryArchive> archive, size_t retry)
     : Work(app, std::string("get-and-unzip-remote-file ") + ft.remoteName(),
-           BasicWork::RETRY_A_LOT)
+           retry)
     , mFt(std::move(ft))
     , mArchive(archive)
-    , mDownloadStart(app.getMetrics().NewMeter(
-          {"history", "download-" + mFt.getType(), "start"}, "event"))
-    , mDownloadSuccess(app.getMetrics().NewMeter(
-          {"history", "download-" + mFt.getType(), "success"}, "event"))
-    , mDownloadFailure(app.getMetrics().NewMeter(
-          {"history", "download-" + mFt.getType(), "failure"}, "event"))
 {
 }
 
@@ -63,14 +59,13 @@ GetAndUnzipRemoteFileWork::onFailureRaise()
         CLOG_ERROR(History, "Archive {}: file {} is maybe corrupt",
                    ar->getName(), mFt.remoteName());
     }
-    mDownloadFailure.Mark();
     Work::onFailureRaise();
 }
 
 void
 GetAndUnzipRemoteFileWork::onSuccess()
 {
-    mDownloadSuccess.Mark();
+    mApp.getCatchupManager().fileDownloaded(mFt.getType());
     Work::onSuccess();
 }
 
@@ -81,8 +76,8 @@ GetAndUnzipRemoteFileWork::doWork()
     if (mGunzipFileWork)
     {
         // Download completed, unzipping started
-        assert(mGetRemoteFileWork);
-        assert(mGetRemoteFileWork->getState() == State::WORK_SUCCESS);
+        releaseAssert(mGetRemoteFileWork);
+        releaseAssert(mGetRemoteFileWork->getState() == State::WORK_SUCCESS);
         auto state = mGunzipFileWork->getState();
         if (state == State::WORK_SUCCESS && !fs::exists(mFt.localPath_nogz()))
         {
@@ -114,7 +109,6 @@ GetAndUnzipRemoteFileWork::doWork()
         mGetRemoteFileWork =
             addWork<GetRemoteFileWork>(mFt.remoteName(), mFt.localPath_gz_tmp(),
                                        mArchive, BasicWork::RETRY_NEVER);
-        mDownloadStart.Mark();
         return State::WORK_RUNNING;
     }
 }

@@ -12,6 +12,7 @@
 #include "transactions/simulation/TxSimManageBuyOfferOpFrame.h"
 #include "transactions/simulation/TxSimManageSellOfferOpFrame.h"
 #include "transactions/simulation/TxSimMergeOpFrame.h"
+#include "util/ProtocolVersion.h"
 
 namespace stellar
 {
@@ -38,6 +39,12 @@ TxSimTransactionFrame::makeOperation(Operation const& op, OperationResult& res,
         mSimulationResult.result.code() == txFAILED)
     {
         resultFromArchive = mSimulationResult.result.results()[index];
+    }
+    else if (mSimulationResult.result.code() == txFEE_BUMP_INNER_SUCCESS ||
+             mSimulationResult.result.code() == txFEE_BUMP_INNER_FAILED)
+    {
+        resultFromArchive = mSimulationResult.result.innerResultPair()
+                                .result.result.results()[index];
     }
 
     switch (ops[index].body.type())
@@ -79,20 +86,23 @@ TxSimTransactionFrame::isTooLate(LedgerTxnHeader const& header,
 }
 
 bool
-TxSimTransactionFrame::isBadSeq(int64_t seqNum) const
+TxSimTransactionFrame::isBadSeq(LedgerTxnHeader const& header,
+                                int64_t seqNum) const
 {
     return mSimulationResult.result.code() == txBAD_SEQ;
 }
 
 int64_t
-TxSimTransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
+TxSimTransactionFrame::getFee(LedgerHeader const& header,
+                              std::optional<int64_t> baseFee,
                               bool applying) const
 {
     return mSimulationResult.feeCharged;
 }
 
 void
-TxSimTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
+TxSimTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx,
+                                        std::optional<int64_t> baseFee)
 {
     mCachedAccount.reset();
 
@@ -117,7 +127,8 @@ TxSimTransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
         header.current().feePool += fee;
     }
     // in v10 we update sequence numbers during apply
-    if (header.current().ledgerVersion <= 9)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_10))
     {
         acc.seqNum = getSeqNum();
     }
@@ -127,7 +138,8 @@ void
 TxSimTransactionFrame::processSeqNum(AbstractLedgerTxn& ltx)
 {
     auto header = ltx.loadHeader();
-    if (header.current().ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_10))
     {
         auto sourceAccount = loadSourceAccount(ltx, header);
         sourceAccount.current().data.account().seqNum = getSeqNum();

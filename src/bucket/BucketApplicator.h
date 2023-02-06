@@ -23,8 +23,11 @@ class BucketApplicator
 {
     Application& mApp;
     uint32_t mMaxProtocolVersion;
+    uint32_t mMinProtocolVersionSeen;
+    uint32_t mLevel;
     BucketInputIterator mBucketIter;
     size_t mCount{0};
+    std::function<bool(LedgerEntryType)> mEntryTypeFilter;
 
   public:
     class Counters
@@ -44,10 +47,18 @@ class BucketApplicator
         uint64_t mDataDelete;
         uint64_t mClaimableBalanceUpsert;
         uint64_t mClaimableBalanceDelete;
+        uint64_t mLiquidityPoolUpsert;
+        uint64_t mLiquidityPoolDelete;
+        uint64_t mContractDataUpsert;
+        uint64_t mContractDataDelete;
+        uint64_t mConfigSettingUpsert;
+        uint64_t mConfigSettingDelete;
         void getRates(VirtualClock::time_point now, uint64_t& au_sec,
                       uint64_t& ad_sec, uint64_t& tu_sec, uint64_t& td_sec,
                       uint64_t& ou_sec, uint64_t& od_sec, uint64_t& du_sec,
                       uint64_t& dd_sec, uint64_t& cu_sec, uint64_t& cd_sec,
+                      uint64_t& lu_sec, uint64_t& ld_sec, uint64_t& cdu_sec,
+                      uint64_t& cdd_sec, uint64_t& cfgu_sec, uint64_t& cfgd_sec,
                       uint64_t& T_sec, uint64_t& total);
 
       public:
@@ -61,7 +72,9 @@ class BucketApplicator
     };
 
     BucketApplicator(Application& app, uint32_t maxProtocolVersion,
-                     std::shared_ptr<const Bucket> bucket);
+                     uint32_t minProtocolVersionSeen, uint32_t level,
+                     std::shared_ptr<Bucket const> bucket,
+                     std::function<bool(LedgerEntryType)> filter);
     operator bool() const;
     size_t advance(Counters& counters);
 

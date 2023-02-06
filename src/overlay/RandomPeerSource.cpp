@@ -7,6 +7,7 @@
 #include "database/Database.h"
 #include "main/Application.h"
 #include "overlay/StellarXDR.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 #include "util/must_use.h"
@@ -23,7 +24,7 @@ namespace stellar
 
 using namespace soci;
 PeerQuery
-RandomPeerSource::maxFailures(int maxFailures, bool requireOutobund)
+RandomPeerSource::maxFailures(size_t maxFailures, bool requireOutobund)
 {
     return {false, maxFailures,
             requireOutobund ? PeerTypeFilter::ANY_OUTBOUND
@@ -72,9 +73,8 @@ RandomPeerSource::RandomPeerSource(PeerManager& peerManager,
 
 std::vector<PeerBareAddress>
 RandomPeerSource::getRandomPeers(
-    int size, std::function<bool(PeerBareAddress const&)> pred)
+    size_t size, std::function<bool(PeerBareAddress const&)> pred)
 {
-    assert(size >= 0);
     if (size == 0)
     {
         return {};

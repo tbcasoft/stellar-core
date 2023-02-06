@@ -66,8 +66,11 @@ class OverlayManager
 
     // Send a given message to all peers, via the FloodGate.
     // returns true if message was sent to at least one peer
-    virtual bool broadcastMessage(StellarMessage const& msg,
-                                  bool force = false) = 0;
+    // When passing a transaction message,
+    // the hash of TransactionEnvelope must be passed also for pull mode.
+    virtual bool
+    broadcastMessage(StellarMessage const& msg, bool force = false,
+                     std::optional<Hash> const hash = std::nullopt) = 0;
 
     // Make a note in the FloodGate that a given peer has provided us with a
     // given broadcast message, so that it is inhibited from being resent to
@@ -126,6 +129,8 @@ class OverlayManager
 
     virtual bool isPreferred(Peer* peer) const = 0;
 
+    virtual bool isFloodMessage(StellarMessage const& msg) = 0;
+
     // Return the current in-memory set of inbound pending peers.
     virtual std::vector<Peer::pointer> const&
     getInboundPendingPeers() const = 0;
@@ -153,6 +158,9 @@ class OverlayManager
 
     // Return number of authenticated peers
     virtual int getAuthenticatedPeersCount() const = 0;
+
+    // Return the percentage [0,100] of connections with pull-mode enabled
+    virtual int64_t getPullModePercentage() const = 0;
 
     // Attempt to connect to a peer identified by peer address.
     virtual void connectTo(PeerBareAddress const& address) = 0;
@@ -183,6 +191,10 @@ class OverlayManager
 
     virtual void updateFloodRecord(StellarMessage const& oldMsg,
                                    StellarMessage const& newMsg) = 0;
+
+    virtual void recordTxPullLatency(Hash const& hash) = 0;
+
+    virtual size_t getMaxAdvertSize() const = 0;
 
     virtual ~OverlayManager()
     {

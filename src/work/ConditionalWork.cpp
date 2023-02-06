@@ -43,7 +43,7 @@ ConditionalWork::onRun()
     }
 
     // Work is not started, so check the condition
-    if (!mCondition())
+    if (!mCondition(mApp))
     {
         CLOG_TRACE(Work, "Condition for {} is not satisfied: sleeping {} ms",
                    getName(), mSleepDelay.count());
@@ -93,7 +93,8 @@ ConditionalWork::onReset()
 std::string
 ConditionalWork::getStatus() const
 {
-    return fmt::format("{}{}", mWorkStarted ? "" : "Waiting before starting ",
+    return fmt::format(FMT_STRING("{}{}"),
+                       mWorkStarted ? "" : "Waiting before starting ",
                        mConditionedWork->getStatus());
 }
 }

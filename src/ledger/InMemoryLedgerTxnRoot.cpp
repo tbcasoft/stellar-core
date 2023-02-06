@@ -1,3 +1,7 @@
+// Copyright 2021 Stellar Development Foundation and contributors. Licensed
+// under the Apache License, Version 2.0. See the COPYING file at the root
+// of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
+
 #include "ledger/InMemoryLedgerTxnRoot.h"
 #include "ledger/LedgerRange.h"
 #include "ledger/LedgerTxn.h"
@@ -23,19 +27,19 @@ InMemoryLedgerTxnRoot::InMemoryLedgerTxnRoot(
 }
 
 void
-InMemoryLedgerTxnRoot::addChild(AbstractLedgerTxn& child)
+InMemoryLedgerTxnRoot::addChild(AbstractLedgerTxn& child, TransactionMode mode)
 {
 }
 
 void
 InMemoryLedgerTxnRoot::commitChild(EntryIterator iter,
-                                   LedgerTxnConsistency cons)
+                                   LedgerTxnConsistency cons) noexcept
 {
-    throw std::runtime_error("committing to stub InMemoryLedgerTxnRoot");
+    printErrorAndAbort("committing to stub InMemoryLedgerTxnRoot");
 }
 
 void
-InMemoryLedgerTxnRoot::rollbackChild()
+InMemoryLedgerTxnRoot::rollbackChild() noexcept
 {
 }
 
@@ -61,6 +65,13 @@ InMemoryLedgerTxnRoot::getBestOffer(Asset const& buying, Asset const& selling,
 UnorderedMap<LedgerKey, LedgerEntry>
 InMemoryLedgerTxnRoot::getOffersByAccountAndAsset(AccountID const& account,
                                                   Asset const& asset)
+{
+    return UnorderedMap<LedgerKey, LedgerEntry>();
+}
+
+UnorderedMap<LedgerKey, LedgerEntry>
+InMemoryLedgerTxnRoot::getPoolShareTrustLinesByAccountAndAsset(
+    AccountID const& account, Asset const& asset)
 {
     return UnorderedMap<LedgerKey, LedgerEntry>();
 }
@@ -128,6 +139,23 @@ InMemoryLedgerTxnRoot::dropClaimableBalances()
 {
 }
 
+void
+InMemoryLedgerTxnRoot::dropLiquidityPools()
+{
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+void
+InMemoryLedgerTxnRoot::dropContractData()
+{
+}
+
+void
+InMemoryLedgerTxnRoot::dropConfigSettings()
+{
+}
+#endif
+
 double
 InMemoryLedgerTxnRoot::getPrefetchHitRate() const
 {
@@ -138,6 +166,10 @@ uint32_t
 InMemoryLedgerTxnRoot::prefetch(UnorderedSet<LedgerKey> const& keys)
 {
     return 0;
+}
+
+void InMemoryLedgerTxnRoot::prepareNewObjects(size_t)
+{
 }
 
 #ifdef BUILD_TESTS

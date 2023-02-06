@@ -6,8 +6,10 @@
 
 #include "herder/Herder.h"
 #include "herder/TxSetFrame.h"
+#include "herder/TxSetUtils.h"
 #include "medida/timer.h"
 #include "scp/SCPDriver.h"
+#include "util/RandomEvictionCache.h"
 #include "xdr/Stellar-ledger.h"
 #include <optional>
 
@@ -33,53 +35,13 @@ struct SCPEnvelope;
 class HerderSCPDriver : public SCPDriver
 {
   public:
-    struct ConsensusData
-    {
-        uint64_t mConsensusIndex;
-        StellarValue mConsensusValue;
-        ConsensusData(uint64_t index, StellarValue const& b)
-            : mConsensusIndex(index), mConsensusValue(b)
-        {
-        }
-    };
-
     HerderSCPDriver(Application& app, HerderImpl& herder,
                     Upgrades const& upgrades,
                     PendingEnvelopes& pendingEnvelopes);
     ~HerderSCPDriver();
 
     void bootstrap();
-    void lostSync();
-
-    Herder::State getState() const;
-
-    ConsensusData*
-    trackingSCP() const
-    {
-        return mTrackingSCP.get();
-    }
-    ConsensusData*
-    lastTrackingSCP() const
-    {
-        return mLastTrackingSCP.get();
-    }
-
-    void restoreSCPState(uint64_t index, StellarValue const& value);
-
-    // the ledger index that was last externalized
-    uint32
-    lastConsensusLedgerIndex() const
-    {
-        assert(mTrackingSCP->mConsensusIndex <= UINT32_MAX);
-        return static_cast<uint32>(mTrackingSCP->mConsensusIndex);
-    }
-
-    // the ledger index that we expect to externalize next
-    uint32
-    nextConsensusLedgerIndex() const
-    {
-        return lastConsensusLedgerIndex() + 1;
-    }
+    void stateChanged();
 
     SCP&
     getSCP()
@@ -105,7 +67,7 @@ class HerderSCPDriver : public SCPDriver
                                       Value const& value) override;
 
     // value marshaling
-    std::string toShortString(PublicKey const& pk) const override;
+    std::string toShortString(NodeID const& pk) const override;
     std::string getValueString(Value const& v) const override;
 
     // timer handling
@@ -125,7 +87,8 @@ class HerderSCPDriver : public SCPDriver
     // Submit a value to consider for slotIndex
     // previousValue is the value from slotIndex-1
     void nominate(uint64_t slotIndex, StellarValue const& value,
-                  TxSetFramePtr proposedSet, StellarValue const& previousValue);
+                  TxSetFrameConstPtr proposedSet,
+                  StellarValue const& previousValue);
 
     SCPQuorumSetPtr getQSet(Hash const& qSetHash) override;
 
@@ -229,20 +192,18 @@ class HerderSCPDriver : public SCPDriver
     // timers used by SCP
     // indexed by slotIndex, timerID
     std::map<uint64_t, std::map<int, std::unique_ptr<VirtualTimer>>> mSCPTimers;
+    // For caching TxSet validity. Consist of {lcl.hash, txSetHash,
+    // lowerBoundCloseTimeOffset, upperBoundCloseTimeOffset}
+    using TxSetValidityKey = std::tuple<Hash, Hash, uint64_t, uint64_t>;
 
-    // if the local instance is tracking the current state of SCP
-    // herder keeps track of the consensus index and ballot
-    // when not set, it just means that herder will try to snap to any slot that
-    // reached consensus
-    // on startup, this can be set to a value persisted from the database
-    std::unique_ptr<ConsensusData> mTrackingSCP;
-
-    // when losing track of consensus, we remember the consensus value so that
-    // we can ignore older ledgers (as we potentially receive old messages)
-    // it only tracks actual consensus values (learned when externalizing)
-    std::unique_ptr<ConsensusData> mLastTrackingSCP;
-
-    void stateChanged();
+    class TxSetValidityKeyHash
+    {
+      public:
+        size_t operator()(TxSetValidityKey const& key) const;
+    };
+    // validity of txSet
+    mutable RandomEvictionCache<TxSetValidityKey, bool, TxSetValidityKeyHash>
+        mTxSetValidCache;
 
     SCPDriver::ValidationLevel validateValueHelper(uint64_t slotIndex,
                                                    StellarValue const& sv,
@@ -260,5 +221,8 @@ class HerderSCPDriver : public SCPDriver
                          std::string const& logStr,
                          std::chrono::nanoseconds threshold,
                          uint64_t slotIndex);
+
+    bool checkAndCacheTxSetValid(TxSetFrameConstPtr TxSet,
+                                 uint64_t closeTimeOffset) const;
 };
 }

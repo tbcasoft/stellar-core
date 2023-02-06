@@ -4,6 +4,7 @@
 
 #include "ledger/LedgerTxn.h"
 #include "lib/catch.hpp"
+#include "lib/util/stdrandom.h"
 #include "main/Application.h"
 #include "test/TestAccount.h"
 #include "test/TestExceptions.h"
@@ -13,6 +14,7 @@
 #include "transactions/TransactionUtils.h"
 #include "transactions/test/SponsorshipTestUtils.h"
 #include "util/Math.h"
+#include "util/ProtocolVersion.h"
 #include <fmt/format.h>
 
 using namespace stellar;
@@ -50,8 +52,8 @@ static void
 randomizePredicatePos(ClaimPredicate pred1, ClaimPredicate pred2,
                       xdr::xvector<ClaimPredicate, 2>& vec)
 {
-    std::uniform_int_distribution<size_t> dist(0, 1);
-    bool randBool = dist(gRandomEngine);
+    stellar::uniform_int_distribution<size_t> dist(0, 1);
+    bool randBool = dist(Catch::rng());
 
     auto const& firstPred = randBool ? pred1 : pred2;
     auto const& secondPred = randBool ? pred2 : pred1;
@@ -294,15 +296,12 @@ validateBalancesOnCreateAndClaim(TestAccount& createAcc, TestAccount& claimAcc,
             claimAccBalanceAfterClaim);
 }
 
-TEST_CASE("claimableBalance", "[tx][claimablebalance]")
+TEST_CASE_VERSIONS("claimableBalance", "[tx][claimablebalance]")
 {
     Config cfg = getTestConfig();
-    cfg.USE_CONFIG_FOR_GENESIS = false;
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-
-    app->start();
 
     // set up world
     auto root = TestAccount::createRoot(*app);
@@ -325,7 +324,6 @@ TEST_CASE("claimableBalance", "[tx][claimablebalance]")
     auto simplePred = makeSimplePredicate(3); // validPredicate
 
     xdr::xvector<Claimant, 10> validClaimants{makeClaimant(acc2, simplePred)};
-
     SECTION("not supported before version 14")
     {
         for_versions_to(13, *app, [&] {
@@ -1102,15 +1100,13 @@ TEST_CASE("claimableBalance", "[tx][claimablebalance]")
             auto accA = root.create("accA", minBalance3);
             auto accB = root.create("accB", lm.getLastMinBalance(4));
 
-            // Allow accA to submit an op from accB. This will bump accB's
-            // seqnum up by 1
+            // Allow accA to submit an op from accB.
             auto sk1 = makeSigner(accA, 100);
             accB.setOptions(setSigner(sk1));
 
-            // Move accA seqnum up by one so accA and accB have the same seqnum
+            // Move accA seqnum to accB's
             accA.bumpSequence(accB.getLastSequenceNumber());
-            REQUIRE(accA.getLastSequenceNumber() ==
-                    accB.getLastSequenceNumber());
+            REQUIRE(accA.loadSequenceNumber() == accB.loadSequenceNumber());
 
             // accB and accA have the same seq num. Create a claimable balance
             // with accB twice. Once using accB as the Tx account, and once with
@@ -1197,7 +1193,20 @@ TEST_CASE("claimableBalance", "[tx][claimablebalance]")
             tooManySponsoring(
                 *app, acc1,
                 acc1.op(createClaimableBalance(native, 1, validClaimants)),
-                acc1.op(createClaimableBalance(native, 1, validClaimants)));
+                acc1.op(createClaimableBalance(native, 1, validClaimants)), 1);
+        }
+
+        SECTION("too many sponsoring multiple claimants")
+        {
+            validClaimants.emplace_back(
+                makeClaimant(root, makeSimplePredicate(1)));
+            validClaimants.emplace_back(
+                makeClaimant(acc1, makeSimplePredicate(1)));
+
+            tooManySponsoring(
+                *app, acc1,
+                acc1.op(createClaimableBalance(native, 1, validClaimants)),
+                acc1.op(createClaimableBalance(native, 1, validClaimants)), 3);
         }
 
         SECTION("source account is issuer")
@@ -1210,6 +1219,99 @@ TEST_CASE("claimableBalance", "[tx][claimablebalance]")
             auto balanceID = issuer.createClaimableBalance(
                 eur, 100, {makeClaimant(issuer, u)});
             issuer.claimClaimableBalance(balanceID);
+        }
+
+        SECTION("op source account last modified is updated on claim of "
+                "sponsored balance")
+        {
+            auto lastModifiedTest = [&](bool isClawback) {
+                {
+                    auto idr = makeAsset(issuer, "IDR");
+
+                    acc2.changeTrust(idr, 1);
+                    issuer.pay(acc2, idr, 1);
+
+                    auto tx = transactionFrameFromOps(
+                        app->getNetworkID(), root,
+                        {root.op(beginSponsoringFutureReserves(acc2)),
+                         acc2.op(
+                             createClaimableBalance(idr, 1, validClaimants)),
+                         acc2.op(endSponsoringFutureReserves())},
+                        {acc2});
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    TransactionMeta txm(2);
+                    REQUIRE(tx->checkValid(ltx, 0, 0, 0));
+                    REQUIRE(tx->apply(*app, ltx, txm));
+                    REQUIRE(tx->getResultCode() == txSUCCESS);
+                    ltx.commit();
+                }
+
+                auto claimAccount = isClawback ? issuer : acc2;
+
+                uint32_t lastModifiedLedgerSeq;
+                {
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    lastModifiedLedgerSeq =
+                        loadAccount(ltx, claimAccount.getPublicKey(), true)
+                            .current()
+                            .lastModifiedLedgerSeq;
+                }
+
+                {
+                    auto balanceID = root.getBalanceID(1);
+
+                    auto claimOp = isClawback
+                                       ? clawbackClaimableBalance(balanceID)
+                                       : claimClaimableBalance(balanceID);
+                    auto tx2 = transactionFrameFromOps(
+                        app->getNetworkID(), root, {claimAccount.op(claimOp)},
+                        {claimAccount});
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    TransactionMeta txm2(2);
+                    REQUIRE(tx2->checkValid(ltx, 0, 0, 0));
+                    REQUIRE(tx2->apply(*app, ltx, txm2));
+                    REQUIRE(tx2->getResultCode() == txSUCCESS);
+
+                    // increment ledgerSeq
+                    auto header = ltx.loadHeader();
+                    ++header.current().ledgerSeq;
+
+                    ltx.commit();
+                }
+                // The op source account was loaded in the last transaction
+                {
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    REQUIRE(lastModifiedLedgerSeq + 1 ==
+                            loadAccount(ltx, claimAccount.getPublicKey(), true)
+                                .current()
+                                .lastModifiedLedgerSeq);
+                }
+            };
+
+            SECTION("claim")
+            {
+                lastModifiedTest(false);
+            }
+
+            uint32_t ledgerVersion;
+            {
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+            }
+
+            if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_17))
+            {
+                SECTION("clawback")
+                {
+                    auto toSet = static_cast<uint32_t>(
+                        AUTH_CLAWBACK_ENABLED_FLAG | AUTH_REVOCABLE_FLAG);
+                    issuer.setOptions(setFlags(toSet));
+
+                    lastModifiedTest(true);
+                }
+            }
         }
     });
 }

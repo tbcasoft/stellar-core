@@ -3,6 +3,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "transactions/TransactionUtils.h"
+#include "crypto/SHA.h"
 #include "crypto/SecretKey.h"
 #include "ledger/InternalLedgerEntry.h"
 #include "ledger/LedgerTxn.h"
@@ -11,12 +12,52 @@
 #include "ledger/TrustLineWrapper.h"
 #include "transactions/OfferExchange.h"
 #include "transactions/SponsorshipUtils.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
+#include "xdr/Stellar-ledger-entries.h"
 #include <Tracy.hpp>
 
 namespace stellar
 {
+
+#ifdef BUILD_TESTS
+#define PROD_CONST
+#else
+#define PROD_CONST const
+#endif
+
+static uint32_t PROD_CONST ACCOUNT_SUBENTRY_LIMIT = 1000;
+static size_t PROD_CONST MAX_OFFERS_TO_CROSS = 1000;
+
+uint32_t
+getAccountSubEntryLimit()
+{
+    return ACCOUNT_SUBENTRY_LIMIT;
+}
+
+size_t
+getMaxOffersToCross()
+{
+    return MAX_OFFERS_TO_CROSS;
+}
+
+#ifdef BUILD_TESTS
+TempReduceLimitsForTesting::TempReduceLimitsForTesting(
+    uint32_t accountSubEntryLimit, size_t maxOffersToCross)
+    : mOldAccountSubEntryLimit(ACCOUNT_SUBENTRY_LIMIT)
+    , mOldMaxOffersToCross(MAX_OFFERS_TO_CROSS)
+{
+    ACCOUNT_SUBENTRY_LIMIT = accountSubEntryLimit;
+    MAX_OFFERS_TO_CROSS = maxOffersToCross;
+}
+
+TempReduceLimitsForTesting::~TempReduceLimitsForTesting()
+{
+    ACCOUNT_SUBENTRY_LIMIT = mOldAccountSubEntryLimit;
+    MAX_OFFERS_TO_CROSS = mOldMaxOffersToCross;
+}
+#endif
 
 AccountEntryExtensionV1&
 prepareAccountEntryExtensionV1(AccountEntry& ae)
@@ -43,6 +84,20 @@ prepareAccountEntryExtensionV2(AccountEntry& ae)
     return extV1.ext.v2();
 }
 
+AccountEntryExtensionV3&
+prepareAccountEntryExtensionV3(AccountEntry& ae)
+{
+    auto& extV2 = prepareAccountEntryExtensionV2(ae);
+    if (extV2.ext.v() == 0)
+    {
+        extV2.ext.v(3);
+        auto& extV3 = extV2.ext.v3();
+        extV3.seqLedger = 0;
+        extV3.seqTime = 0;
+    }
+    return extV2.ext.v3();
+}
+
 TrustLineEntry::_ext_t::_v1_t&
 prepareTrustLineEntryExtensionV1(TrustLineEntry& tl)
 {
@@ -52,6 +107,19 @@ prepareTrustLineEntryExtensionV1(TrustLineEntry& tl)
         tl.ext.v1().liabilities = Liabilities{0, 0};
     }
     return tl.ext.v1();
+}
+
+TrustLineEntryExtensionV2&
+prepareTrustLineEntryExtensionV2(TrustLineEntry& tl)
+{
+    auto& extV1 = prepareTrustLineEntryExtensionV1(tl);
+
+    if (extV1.ext.v() == 0)
+    {
+        extV1.ext.v(2);
+        extV1.ext.v2().liquidityPoolUseCount = 0;
+    }
+    return extV1.ext.v2();
 }
 
 LedgerEntryExtensionV1&
@@ -65,6 +133,17 @@ prepareLedgerEntryExtensionV1(LedgerEntry& le)
     return le.ext.v1();
 }
 
+void
+setLedgerHeaderFlag(LedgerHeader& lh, uint32_t flags)
+{
+    if (lh.ext.v() == 0)
+    {
+        lh.ext.v(1);
+    }
+
+    lh.ext.v1().flags = flags;
+}
+
 AccountEntryExtensionV2&
 getAccountEntryExtensionV2(AccountEntry& ae)
 {
@@ -73,6 +152,28 @@ getAccountEntryExtensionV2(AccountEntry& ae)
         throw std::runtime_error("expected AccountEntry extension V2");
     }
     return ae.ext.v1().ext.v2();
+}
+
+AccountEntryExtensionV3 const&
+getAccountEntryExtensionV3(AccountEntry const& ae)
+{
+    if (ae.ext.v() != 1 || ae.ext.v1().ext.v() != 2 ||
+        ae.ext.v1().ext.v2().ext.v() != 3)
+    {
+        throw std::runtime_error("expected AccountEntry extension V3");
+    }
+    return ae.ext.v1().ext.v2().ext.v3();
+}
+
+TrustLineEntryExtensionV2&
+getTrustLineEntryExtensionV2(TrustLineEntry& tl)
+{
+    if (!hasTrustLineEntryExtV2(tl))
+    {
+        throw std::runtime_error("expected TrustLineEntry extension V2");
+    }
+
+    return tl.ext.v1().ext.v2();
 }
 
 LedgerEntryExtensionV1&
@@ -89,7 +190,7 @@ getLedgerEntryExtensionV1(LedgerEntry& le)
 static bool
 checkAuthorization(LedgerHeader const& header, LedgerEntry const& entry)
 {
-    if (header.ledgerVersion < 10)
+    if (protocolVersionIsBefore(header.ledgerVersion, ProtocolVersion::V_10))
     {
         if (!isAuthorized(entry))
         {
@@ -114,6 +215,12 @@ accountKey(AccountID const& accountID)
 
 LedgerKey
 trustlineKey(AccountID const& accountID, Asset const& asset)
+{
+    return trustlineKey(accountID, assetToTrustLineAsset(asset));
+}
+
+LedgerKey
+trustlineKey(AccountID const& accountID, TrustLineAsset const& asset)
 {
     LedgerKey key(TRUSTLINE);
     key.trustLine().accountID = accountID;
@@ -147,20 +254,59 @@ claimableBalanceKey(ClaimableBalanceID const& balanceID)
     return key;
 }
 
+LedgerKey
+liquidityPoolKey(PoolID const& poolID)
+{
+    LedgerKey key(LIQUIDITY_POOL);
+    key.liquidityPool().liquidityPoolID = poolID;
+    return key;
+}
+
+LedgerKey
+poolShareTrustLineKey(AccountID const& accountID, PoolID const& poolID)
+{
+    LedgerKey key(TRUSTLINE);
+    key.trustLine().accountID = accountID;
+    key.trustLine().asset.type(ASSET_TYPE_POOL_SHARE);
+    key.trustLine().asset.liquidityPoolID() = poolID;
+    return key;
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+LedgerKey
+configSettingKey(ConfigSettingID const& configSettingID)
+{
+    LedgerKey key(CONFIG_SETTING);
+    key.configSetting().configSettingID = configSettingID;
+    return key;
+}
+
+LedgerKey
+contractDataKey(Hash const& contractID, SCVal const& dataKey)
+{
+    LedgerKey key(CONTRACT_DATA);
+    key.contractData().contractID = contractID;
+    key.contractData().key = dataKey;
+    return key;
+}
+#endif
+
 InternalLedgerKey
 sponsorshipKey(AccountID const& sponsoredID)
 {
-    InternalLedgerKey gkey(InternalLedgerEntryType::SPONSORSHIP);
-    gkey.sponsorshipKey().sponsoredID = sponsoredID;
-    return gkey;
+    return InternalLedgerKey::makeSponsorshipKey(sponsoredID);
 }
 
 InternalLedgerKey
 sponsorshipCounterKey(AccountID const& sponsoringID)
 {
-    InternalLedgerKey gkey(InternalLedgerEntryType::SPONSORSHIP_COUNTER);
-    gkey.sponsorshipCounterKey().sponsoringID = sponsoringID;
-    return gkey;
+    return InternalLedgerKey::makeSponsorshipCounterKey(sponsoringID);
+}
+
+InternalLedgerKey
+maxSeqNumToApplyKey(AccountID const& sourceAccount)
+{
+    return InternalLedgerKey::makeMaxSeqNumToApplyKey(sourceAccount);
 }
 
 LedgerTxnEntry
@@ -252,6 +398,37 @@ loadSponsorshipCounter(AbstractLedgerTxn& ltx, AccountID const& sponsoringID)
     return ltx.load(sponsorshipCounterKey(sponsoringID));
 }
 
+LedgerTxnEntry
+loadMaxSeqNumToApply(AbstractLedgerTxn& ltx, AccountID const& sourceAccount)
+{
+    return ltx.load(maxSeqNumToApplyKey(sourceAccount));
+}
+
+LedgerTxnEntry
+loadPoolShareTrustLine(AbstractLedgerTxn& ltx, AccountID const& accountID,
+                       PoolID const& poolID)
+{
+    ZoneScoped;
+    return ltx.load(poolShareTrustLineKey(accountID, poolID));
+}
+
+LedgerTxnEntry
+loadLiquidityPool(AbstractLedgerTxn& ltx, PoolID const& poolID)
+{
+    ZoneScoped;
+    return ltx.load(liquidityPoolKey(poolID));
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+LedgerTxnEntry
+loadContractData(AbstractLedgerTxn& ltx, Hash const& contractID,
+                 SCVal const& dataKey)
+{
+    ZoneScoped;
+    return ltx.load(contractDataKey(contractID, dataKey));
+}
+#endif
+
 static void
 acquireOrReleaseLiabilities(AbstractLedgerTxn& ltx,
                             LedgerTxnHeader const& header,
@@ -342,7 +519,8 @@ addBalanceSkipAuthorization(LedgerTxnHeader const& header,
     {
         return false;
     }
-    if (header.current().ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_10))
     {
         if (newBalance < getSellingLiabilities(header, entry))
         {
@@ -374,7 +552,8 @@ addBalance(LedgerTxnHeader const& header, LedgerTxnEntry& entry, int64_t delta)
         {
             return false;
         }
-        if (header.current().ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                      ProtocolVersion::V_10))
         {
             auto minBalance = getMinBalance(header.current(), acc);
             if (delta < 0 &&
@@ -539,7 +718,7 @@ getAvailableBalance(LedgerHeader const& header, LedgerEntry const& le)
         throw std::runtime_error("Unknown LedgerEntry type");
     }
 
-    if (header.ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(header.ledgerVersion, ProtocolVersion::V_10))
     {
         avail -= getSellingLiabilities(header, le);
     }
@@ -562,7 +741,8 @@ getAvailableBalance(LedgerTxnHeader const& header,
 int64_t
 getBuyingLiabilities(LedgerTxnHeader const& header, LedgerEntry const& le)
 {
-    if (header.current().ledgerVersion < 10)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_10))
     {
         throw std::runtime_error("Liabilities accessed before version 10");
     }
@@ -592,7 +772,8 @@ getMaxAmountReceive(LedgerTxnHeader const& header, LedgerEntry const& le)
     if (le.data.type() == ACCOUNT)
     {
         int64_t maxReceive = INT64_MAX;
-        if (header.current().ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                      ProtocolVersion::V_10))
         {
             auto const& acc = le.data.account();
             maxReceive -= acc.balance + getBuyingLiabilities(header, le);
@@ -608,7 +789,8 @@ getMaxAmountReceive(LedgerTxnHeader const& header, LedgerEntry const& le)
 
         auto const& tl = le.data.trustLine();
         int64_t amount = tl.limit - tl.balance;
-        if (header.current().ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                      ProtocolVersion::V_10))
         {
             amount -= getBuyingLiabilities(header, le);
         }
@@ -638,7 +820,9 @@ getMinBalance(LedgerHeader const& header, AccountEntry const& acc)
 {
     uint32_t numSponsoring = 0;
     uint32_t numSponsored = 0;
-    if (header.ledgerVersion >= 14 && hasAccountEntryExtV2(acc))
+    if (protocolVersionStartsFrom(header.ledgerVersion,
+                                  ProtocolVersion::V_14) &&
+        hasAccountEntryExtV2(acc))
     {
         numSponsoring = acc.ext.v1().ext.v2().numSponsoring;
         numSponsored = acc.ext.v1().ext.v2().numSponsored;
@@ -651,12 +835,13 @@ int64_t
 getMinBalance(LedgerHeader const& lh, uint32_t numSubentries,
               uint32_t numSponsoring, uint32_t numSponsored)
 {
-    if (lh.ledgerVersion < 14 && (numSponsored != 0 || numSponsoring != 0))
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14) &&
+        (numSponsored != 0 || numSponsoring != 0))
     {
         throw std::runtime_error("unexpected sponsorship state");
     }
 
-    if (lh.ledgerVersion <= 8)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_9))
     {
         return (2 + numSubentries) * lh.baseReserve;
     }
@@ -679,7 +864,8 @@ getMinimumLimit(LedgerTxnHeader const& header, LedgerEntry const& le)
 {
     auto const& tl = le.data.trustLine();
     int64_t minLimit = tl.balance;
-    if (header.current().ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_10))
     {
         minLimit += getBuyingLiabilities(header, le);
     }
@@ -702,7 +888,8 @@ int64_t
 getOfferBuyingLiabilities(LedgerTxnHeader const& header,
                           LedgerEntry const& entry)
 {
-    if (header.current().ledgerVersion < 10)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_10))
     {
         throw std::runtime_error(
             "Offer liabilities calculated before version 10");
@@ -725,7 +912,8 @@ int64_t
 getOfferSellingLiabilities(LedgerTxnHeader const& header,
                            LedgerEntry const& entry)
 {
-    if (header.current().ledgerVersion < 10)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_10))
     {
         throw std::runtime_error(
             "Offer liabilities calculated before version 10");
@@ -747,7 +935,7 @@ getOfferSellingLiabilities(LedgerTxnHeader const& header,
 int64_t
 getSellingLiabilities(LedgerHeader const& header, LedgerEntry const& le)
 {
-    if (header.ledgerVersion < 10)
+    if (protocolVersionIsBefore(header.ledgerVersion, ProtocolVersion::V_10))
     {
         throw std::runtime_error("Liabilities accessed before version 10");
     }
@@ -772,13 +960,17 @@ getSellingLiabilities(LedgerTxnHeader const& header,
     return getSellingLiabilities(header.current(), entry.current());
 }
 
-uint64_t
+SequenceNumber
 getStartingSequenceNumber(uint32_t ledgerSeq)
 {
-    return static_cast<uint64_t>(ledgerSeq) << 32;
+    if (ledgerSeq > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()))
+    {
+        throw std::runtime_error("overflowed getStartingSequenceNumber");
+    }
+    return static_cast<SequenceNumber>(ledgerSeq) << 32;
 }
 
-uint64_t
+SequenceNumber
 getStartingSequenceNumber(LedgerTxnHeader const& header)
 {
     return getStartingSequenceNumber(header.current().ledgerSeq);
@@ -803,7 +995,7 @@ isAuthorized(ConstLedgerTxnEntry const& entry)
 }
 
 bool
-isAuthorizedToMaintainLiabilities(uint32_t flags)
+isAuthorizedToMaintainLiabilitiesUnsafe(uint32_t flags)
 {
     return (flags & TRUSTLINE_AUTH_FLAGS) != 0;
 }
@@ -811,7 +1003,11 @@ isAuthorizedToMaintainLiabilities(uint32_t flags)
 bool
 isAuthorizedToMaintainLiabilities(LedgerEntry const& le)
 {
-    return isAuthorizedToMaintainLiabilities(le.data.trustLine().flags);
+    if (le.data.trustLine().asset.type() == ASSET_TYPE_POOL_SHARE)
+    {
+        return true;
+    }
+    return isAuthorizedToMaintainLiabilitiesUnsafe(le.data.trustLine().flags);
 }
 
 bool
@@ -845,11 +1041,16 @@ isClawbackEnabledOnTrustline(LedgerTxnEntry const& entry)
 }
 
 bool
+isClawbackEnabledOnClaimableBalance(ClaimableBalanceEntry const& entry)
+{
+    return entry.ext.v() == 1 && (entry.ext.v1().flags &
+                                  CLAIMABLE_BALANCE_CLAWBACK_ENABLED_FLAG) != 0;
+}
+
+bool
 isClawbackEnabledOnClaimableBalance(LedgerEntry const& entry)
 {
-    return entry.data.claimableBalance().ext.v() == 1 &&
-           (entry.data.claimableBalance().ext.v1().flags &
-            CLAIMABLE_BALANCE_CLAWBACK_ENABLED_FLAG) != 0;
+    return isClawbackEnabledOnClaimableBalance(entry.data.claimableBalance());
 }
 
 bool
@@ -870,10 +1071,48 @@ isClawbackEnabledOnAccount(ConstLedgerTxnEntry const& entry)
     return isClawbackEnabledOnAccount(entry.current());
 }
 
+void
+setClaimableBalanceClawbackEnabled(ClaimableBalanceEntry& cb)
+{
+    if (cb.ext.v() != 0)
+    {
+        throw std::runtime_error(
+            "unexpected ClaimableBalanceEntry ext version");
+    }
+
+    cb.ext.v(1);
+    cb.ext.v1().flags = CLAIMABLE_BALANCE_CLAWBACK_ENABLED_FLAG;
+}
+
 bool
 isImmutableAuth(LedgerTxnEntry const& entry)
 {
     return (entry.current().data.account().flags & AUTH_IMMUTABLE_FLAG) != 0;
+}
+
+static bool
+isLedgerHeaderFlagSet(LedgerHeader const& header, uint32_t flag)
+{
+    return header.ext.v() == 1 && (header.ext.v1().flags & flag) != 0;
+}
+
+bool
+isPoolDepositDisabled(LedgerHeader const& header)
+{
+    return isLedgerHeaderFlagSet(header, DISABLE_LIQUIDITY_POOL_DEPOSIT_FLAG);
+}
+
+bool
+isPoolWithdrawalDisabled(LedgerHeader const& header)
+{
+    return isLedgerHeaderFlagSet(header,
+                                 DISABLE_LIQUIDITY_POOL_WITHDRAWAL_FLAG);
+}
+
+bool
+isPoolTradingDisabled(LedgerHeader const& header)
+{
+    return isLedgerHeaderFlagSet(header, DISABLE_LIQUIDITY_POOL_TRADING_FLAG);
 }
 
 void
@@ -887,7 +1126,8 @@ bool
 trustLineFlagIsValid(uint32_t flag, uint32_t ledgerVersion)
 {
     return trustLineFlagMaskCheckIsValid(flag, ledgerVersion) &&
-           (ledgerVersion < 13 || trustLineFlagAuthIsValid(flag));
+           (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_13) ||
+            trustLineFlagAuthIsValid(flag));
 }
 
 bool
@@ -907,17 +1147,17 @@ trustLineFlagAuthIsValid(uint32_t flag)
 bool
 trustLineFlagMaskCheckIsValid(uint32_t flag, uint32_t ledgerVersion)
 {
-    if (ledgerVersion < 13)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_13))
     {
         return (flag & ~MASK_TRUSTLINE_FLAGS) == 0;
     }
-    else if (ledgerVersion < 17)
+    else if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_17))
     {
         return (flag & ~MASK_TRUSTLINE_FLAGS_V13) == 0;
     }
     else
     {
-        return (flag & ~MASK_TRUSTLINE_FLAGS_V16) == 0;
+        return (flag & ~MASK_TRUSTLINE_FLAGS_V17) == 0;
     }
 }
 
@@ -931,7 +1171,8 @@ accountFlagIsValid(uint32_t flag, uint32_t ledgerVersion)
 bool
 accountFlagClawbackIsValid(uint32_t flag, uint32_t ledgerVersion)
 {
-    if (ledgerVersion >= 17 && (flag & AUTH_CLAWBACK_ENABLED_FLAG) &&
+    if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_17) &&
+        (flag & AUTH_CLAWBACK_ENABLED_FLAG) &&
         ((flag & AUTH_REVOCABLE_FLAG) == 0))
     {
         return false;
@@ -943,12 +1184,12 @@ accountFlagClawbackIsValid(uint32_t flag, uint32_t ledgerVersion)
 bool
 accountFlagMaskCheckIsValid(uint32_t flag, uint32_t ledgerVersion)
 {
-    if (ledgerVersion < 17)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_17))
     {
         return (flag & ~MASK_ACCOUNT_FLAGS) == 0;
     }
 
-    return (flag & ~MASK_ACCOUNT_FLAGS_V16) == 0;
+    return (flag & ~MASK_ACCOUNT_FLAGS_V17) == 0;
 }
 
 AccountID
@@ -1012,6 +1253,19 @@ hasAccountEntryExtV2(AccountEntry const& ae)
     return ae.ext.v() == 1 && ae.ext.v1().ext.v() == 2;
 }
 
+bool
+hasAccountEntryExtV3(AccountEntry const& ae)
+{
+    return ae.ext.v() == 1 && ae.ext.v1().ext.v() == 2 &&
+           ae.ext.v1().ext.v2().ext.v() == 3;
+}
+
+bool
+hasTrustLineEntryExtV2(TrustLineEntry const& tl)
+{
+    return tl.ext.v() == 1 && tl.ext.v1().ext.v() == 2;
+}
+
 Asset
 getAsset(AccountID const& issuer, AssetCode const& assetCode)
 {
@@ -1046,7 +1300,9 @@ claimableBalanceFlagIsValid(ClaimableBalanceEntry const& cb)
     return true;
 }
 
-void
+// The following static methods are used for authorization revocation
+
+static void
 removeOffersByAccountAndAsset(AbstractLedgerTxn& ltx, AccountID const& account,
                               Asset const& asset)
 {
@@ -1074,6 +1330,487 @@ removeOffersByAccountAndAsset(AbstractLedgerTxn& ltx, AccountID const& account,
         offer.erase();
     }
     ltxInner.commit();
+}
+
+static bool
+tryGetEntrySponsor(LedgerTxnEntry& entry, AccountID& sponsor)
+{
+    if (entry.current().ext.v() == 1 &&
+        getLedgerEntryExtensionV1(entry.current()).sponsoringID)
+    {
+        sponsor = *getLedgerEntryExtensionV1(entry.current()).sponsoringID;
+        return true;
+    }
+
+    return false;
+}
+
+static AccountID
+getTrustLineBacker(LedgerTxnEntry& trustLine)
+{
+    AccountID sponsor;
+    if (tryGetEntrySponsor(trustLine, sponsor))
+    {
+        return sponsor;
+    }
+
+    return trustLine.current().data.trustLine().accountID;
+}
+
+static void
+prefetchForRevokeFromPoolShareTrustLines(
+    AbstractLedgerTxn& ltx, AccountID const& accountID,
+    std::vector<LedgerTxnEntry>& poolShareTrustLines)
+{
+    // first prefetch the liquidity pools and pool share trustline sponsors
+    UnorderedSet<LedgerKey> keys;
+    for (auto& trustLine : poolShareTrustLines)
+    {
+        keys.emplace(liquidityPoolKey(
+            trustLine.current().data.trustLine().asset.liquidityPoolID()));
+
+        AccountID sponsor;
+        if (tryGetEntrySponsor(trustLine, sponsor))
+        {
+            keys.emplace(accountKey(sponsor));
+        }
+    }
+    ltx.prefetch(keys);
+
+    // now prefetch the asset trustlines
+    keys.clear();
+    for (auto const& trustLine : poolShareTrustLines)
+    {
+        // prefetching shouldn't affect the protocol, so use loadWithoutRecord
+        // to not touch lastModified
+        auto pool = ltx.loadWithoutRecord(liquidityPoolKey(
+            trustLine.current().data.trustLine().asset.liquidityPoolID()));
+
+        auto const& params =
+            pool.current().data.liquidityPool().body.constantProduct().params;
+
+        if (params.assetA.type() != ASSET_TYPE_NATIVE &&
+            !isIssuer(accountID, params.assetA))
+        {
+            keys.emplace(trustlineKey(accountID, params.assetA));
+        }
+
+        if (params.assetB.type() != ASSET_TYPE_NATIVE &&
+            !isIssuer(accountID, params.assetB))
+        {
+            keys.emplace(trustlineKey(accountID, params.assetB));
+        }
+    }
+    ltx.prefetch(keys);
+}
+
+static ClaimableBalanceID
+getRevokeID(AccountID const& txSourceID, SequenceNumber txSeqNum,
+            uint32_t opIndex, PoolID const& poolID, Asset const& asset)
+{
+    HashIDPreimage hashPreimage;
+    hashPreimage.type(ENVELOPE_TYPE_POOL_REVOKE_OP_ID);
+    hashPreimage.revokeID().sourceAccount = txSourceID;
+    hashPreimage.revokeID().seqNum = txSeqNum;
+    hashPreimage.revokeID().opNum = opIndex;
+    hashPreimage.revokeID().liquidityPoolID = poolID;
+    hashPreimage.revokeID().asset = asset;
+
+    ClaimableBalanceID balanceID;
+    balanceID.type(CLAIMABLE_BALANCE_ID_TYPE_V0);
+    balanceID.v0() = xdrSha256(hashPreimage);
+
+    return balanceID;
+}
+
+static Claimant
+makeUnconditionalClaimant(AccountID const& accountID)
+{
+    Claimant c;
+    c.v0().destination = accountID;
+    c.v0().predicate.type(CLAIM_PREDICATE_UNCONDITIONAL);
+
+    return c;
+}
+
+static std::vector<LedgerKey>
+prefetchPoolShareTrustLinesByAccountAndGetKeys(AbstractLedgerTxn& ltx,
+                                               AccountID const& accountID,
+                                               Asset const& asset)
+{
+    // always rolls back
+    LedgerTxn ltxInner(ltx);
+
+    // this will get the pool share trustlines into the mEntryCache
+    auto poolShareTrustLines =
+        ltxInner.loadPoolShareTrustLinesByAccountAndAsset(accountID, asset);
+
+    if (poolShareTrustLines.empty())
+    {
+        return {};
+    }
+
+    prefetchForRevokeFromPoolShareTrustLines(ltxInner, accountID,
+                                             poolShareTrustLines);
+
+    std::vector<LedgerKey> poolTLKeys;
+    for (auto const& poolShareTrustLine : poolShareTrustLines)
+    {
+        poolTLKeys.emplace_back(LedgerEntryKey(poolShareTrustLine.current()));
+    }
+
+    return poolTLKeys;
+}
+
+RemoveResult
+removeOffersAndPoolShareTrustLines(AbstractLedgerTxn& ltx,
+                                   AccountID const& accountID,
+                                   Asset const& asset,
+                                   AccountID const& txSourceID,
+                                   SequenceNumber txSeqNum, uint32_t opIndex)
+{
+    removeOffersByAccountAndAsset(ltx, accountID, asset);
+
+    LedgerTxn ltxInner(ltx);
+
+    if (protocolVersionIsBefore(ltxInner.loadHeader().current().ledgerVersion,
+                                ProtocolVersion::V_18))
+    {
+        return RemoveResult::SUCCESS;
+    }
+
+    // Get the keys and load the pool share trustlines individually below so we
+    // can use nested LedgerTxns.
+    auto poolTLKeys = prefetchPoolShareTrustLinesByAccountAndGetKeys(
+        ltxInner, accountID, asset);
+    if (poolTLKeys.empty())
+    {
+        return RemoveResult::SUCCESS;
+    }
+
+    for (auto const& poolTLKey : poolTLKeys)
+    {
+        auto poolShareTrustLine = loadPoolShareTrustLine(
+            ltxInner, accountID, poolTLKey.trustLine().asset.liquidityPoolID());
+
+        // use a lambda so we don't hold a reference to the internals of
+        // TrustLineEntry
+        auto poolTL = [&]() -> TrustLineEntry const& {
+            return poolShareTrustLine.current().data.trustLine();
+        };
+
+        auto poolID = poolTL().asset.liquidityPoolID();
+        auto balance = poolTL().balance;
+        auto cbSponsoringAccID = getTrustLineBacker(poolShareTrustLine);
+
+        // release reserves and delete the pool share trustline
+        {
+            auto trustAcc = stellar::loadAccount(ltxInner, accountID);
+            removeEntryWithPossibleSponsorship(ltxInner, ltxInner.loadHeader(),
+                                               poolShareTrustLine.current(),
+                                               trustAcc);
+
+            // using poolTL() after this will throw an exception
+            poolShareTrustLine.erase();
+        }
+
+        auto redeemIntoClaimableBalance =
+            [&ltxInner, &txSourceID, txSeqNum, opIndex, &poolID, &accountID,
+             &cbSponsoringAccID](Asset const& assetInPool,
+                                 int64_t amount) -> RemoveResult {
+            // if the amount is 0 or the claimant is the issuer, then we don't
+            // create the claimable balance
+            if (isIssuer(accountID, assetInPool) || amount == 0)
+            {
+                return RemoveResult::SUCCESS;
+            }
+
+            // create a claimable balance for the asset in the pool
+            LedgerEntry claimableBalance;
+            claimableBalance.data.type(CLAIMABLE_BALANCE);
+
+            auto& claimableBalanceEntry =
+                claimableBalance.data.claimableBalance();
+
+            claimableBalanceEntry.balanceID =
+                getRevokeID(txSourceID, txSeqNum, opIndex, poolID, assetInPool);
+            claimableBalanceEntry.amount = amount;
+            claimableBalanceEntry.asset = assetInPool;
+            claimableBalanceEntry.claimants = {
+                makeUnconditionalClaimant(accountID)};
+
+            // if this asset isn't native
+            // 1. set clawback if it's set on the trustline
+            // 2. decrement liquidityPoolUseCount on the asset trustline
+            if (assetInPool.type() != ASSET_TYPE_NATIVE)
+            {
+                // asset trustline must exist because the pool share trustline
+                // exists, and this lambda returns early if the issuer is the
+                // claimant
+                auto assetTrustLine =
+                    loadTrustLine(ltxInner, accountID, assetInPool);
+                if (assetTrustLine.isClawbackEnabled())
+                {
+                    setClaimableBalanceClawbackEnabled(claimableBalanceEntry);
+                }
+            }
+
+            // The account that sponsored the deleted pool share trustline will
+            // be used for the claimable balances. If that account is currently
+            // in a sponsorship sandwich, that sponsoring account will instead
+            // sponsor the claimable balance.
+            if (loadSponsorship(ltxInner, cbSponsoringAccID))
+            {
+                auto cbSponsoringLtxAcc =
+                    stellar::loadAccount(ltxInner, cbSponsoringAccID);
+                switch (createEntryWithPossibleSponsorship(
+                    ltxInner, ltxInner.loadHeader(), claimableBalance,
+                    cbSponsoringLtxAcc))
+                {
+                case SponsorshipResult::SUCCESS:
+                    break;
+                // LOW_RESERVE and TOO_MANY_SPONSORING are possible because the
+                // sponsoring account in the sandwich was not the account that
+                // released the pool share trustline, so there might not be
+                // available reserves or sponsoring space
+                case SponsorshipResult::LOW_RESERVE:
+                    return RemoveResult::LOW_RESERVE;
+                case SponsorshipResult::TOO_MANY_SPONSORING:
+                    return RemoveResult::TOO_MANY_SPONSORING;
+                case SponsorshipResult::TOO_MANY_SPONSORED:
+                    // This is impossible because there's no sponsored account.
+                    // Fall through and throw.
+                case SponsorshipResult::TOO_MANY_SUBENTRIES:
+                    // This is impossible because claimable balances don't use
+                    // subentries. Fall through and throw.
+                default:
+                    throw std::runtime_error("Unexpected result from "
+                                             "canEstablishEntrySponsorship");
+                }
+            }
+            else
+            {
+                // not in a sponsorship sandwich
+                // we don't use createEntryWithPossibleSponsorship here since
+                // it can return LOW_RESERVE if the base reserve
+                // was increased after the pool share trustline was created. We
+                // are allowing this claimable balance to take the reserve that
+                // the pool share trustline took, even if this account is below
+                // the minimum balance.
+                auto cbSponsoringLtxAcc =
+                    stellar::loadAccount(ltxInner, cbSponsoringAccID);
+
+                uint32_t mult = computeMultiplier(claimableBalance);
+                if (getNumSponsoring(cbSponsoringLtxAcc.current()) >
+                    UINT32_MAX - mult)
+                {
+                    throw std::runtime_error(
+                        "no numSponsoring available for revoke");
+                }
+
+                establishEntrySponsorship(
+                    claimableBalance, cbSponsoringLtxAcc.current(), nullptr);
+            }
+
+            ltxInner.create(claimableBalance);
+            return RemoveResult::SUCCESS;
+        };
+
+        auto pool = loadLiquidityPool(ltxInner, poolID);
+        // use a lambda so we don't hold a reference to the
+        // LiquidityPoolEntry
+        auto constantProduct = [&]() -> auto&
+        {
+            return pool.current().data.liquidityPool().body.constantProduct();
+        };
+
+        if (balance != 0)
+        {
+            auto amountA = getPoolWithdrawalAmount(
+                balance, constantProduct().totalPoolShares,
+                constantProduct().reserveA);
+
+            if (auto res = redeemIntoClaimableBalance(
+                    constantProduct().params.assetA, amountA);
+                res != RemoveResult::SUCCESS)
+            {
+                return res;
+            }
+
+            auto amountB = getPoolWithdrawalAmount(
+                balance, constantProduct().totalPoolShares,
+                constantProduct().reserveB);
+
+            if (auto res = redeemIntoClaimableBalance(
+                    constantProduct().params.assetB, amountB);
+                res != RemoveResult::SUCCESS)
+            {
+                return res;
+            }
+
+            constantProduct().totalPoolShares -= balance;
+            constantProduct().reserveA -= amountA;
+            constantProduct().reserveB -= amountB;
+        }
+
+        // decrementLiquidityPoolUseCount will create a nested LedgerTxn and
+        // deactivate all loaded entries, so copy the assets here
+        auto const assetA = constantProduct().params.assetA;
+        auto const assetB = constantProduct().params.assetB;
+
+        decrementLiquidityPoolUseCount(ltxInner, assetA, accountID);
+        decrementLiquidityPoolUseCount(ltxInner, assetB, accountID);
+
+        // pool was deactivated in decrementLiquidityPoolUseCount
+        pool = loadLiquidityPool(ltxInner, poolID);
+        decrementPoolSharesTrustLineCount(pool);
+    }
+
+    ltxInner.commit();
+    return RemoveResult::SUCCESS;
+}
+
+void
+decrementPoolSharesTrustLineCount(LedgerTxnEntry& liquidityPool)
+{
+    auto poolTLCount = --liquidityPool.current()
+                             .data.liquidityPool()
+                             .body.constantProduct()
+                             .poolSharesTrustLineCount;
+    if (poolTLCount == 0)
+    {
+        liquidityPool.erase();
+    }
+    else if (poolTLCount < 0)
+    {
+        throw std::runtime_error("poolSharesTrustLineCount is negative");
+    }
+}
+
+void
+decrementLiquidityPoolUseCount(AbstractLedgerTxn& ltx, Asset const& asset,
+                               AccountID const& accountID)
+{
+    LedgerTxn ltxInner(ltx);
+    if (!isIssuer(accountID, asset) && asset.type() != ASSET_TYPE_NATIVE)
+    {
+        auto assetTrustLine = ltxInner.load(trustlineKey(accountID, asset));
+        if (!assetTrustLine)
+        {
+            throw std::runtime_error("asset trustline is missing");
+        }
+
+        if (--getTrustLineEntryExtensionV2(
+                  assetTrustLine.current().data.trustLine())
+                  .liquidityPoolUseCount < 0)
+        {
+            throw std::runtime_error("liquidityPoolUseCount is negative");
+        }
+    }
+    ltxInner.commit();
+}
+
+template <typename T>
+T
+assetConversionHelper(Asset const& asset)
+{
+    T otherAsset;
+    otherAsset.type(asset.type());
+
+    switch (asset.type())
+    {
+    case stellar::ASSET_TYPE_NATIVE:
+        break;
+    case stellar::ASSET_TYPE_CREDIT_ALPHANUM4:
+        otherAsset.alphaNum4() = asset.alphaNum4();
+        break;
+    case stellar::ASSET_TYPE_CREDIT_ALPHANUM12:
+        otherAsset.alphaNum12() = asset.alphaNum12();
+        break;
+    case stellar::ASSET_TYPE_POOL_SHARE:
+        throw std::runtime_error("Asset can't have type ASSET_TYPE_POOL_SHARE");
+    default:
+        throw std::runtime_error("Unknown asset type");
+    }
+
+    return otherAsset;
+}
+
+TrustLineAsset
+assetToTrustLineAsset(Asset const& asset)
+{
+    return assetConversionHelper<TrustLineAsset>(asset);
+}
+
+ChangeTrustAsset
+assetToChangeTrustAsset(Asset const& asset)
+{
+    return assetConversionHelper<ChangeTrustAsset>(asset);
+}
+
+TrustLineAsset
+changeTrustAssetToTrustLineAsset(ChangeTrustAsset const& ctAsset)
+{
+    TrustLineAsset tlAsset;
+    tlAsset.type(ctAsset.type());
+
+    switch (ctAsset.type())
+    {
+    case stellar::ASSET_TYPE_NATIVE:
+        break;
+    case stellar::ASSET_TYPE_CREDIT_ALPHANUM4:
+        tlAsset.alphaNum4() = ctAsset.alphaNum4();
+        break;
+    case stellar::ASSET_TYPE_CREDIT_ALPHANUM12:
+        tlAsset.alphaNum12() = ctAsset.alphaNum12();
+        break;
+    case stellar::ASSET_TYPE_POOL_SHARE:
+        tlAsset.liquidityPoolID() = xdrSha256(ctAsset.liquidityPool());
+        break;
+    default:
+        throw std::runtime_error("Unknown asset type");
+    }
+
+    return tlAsset;
+}
+
+int64_t
+getPoolWithdrawalAmount(int64_t amountPoolShares, int64_t totalPoolShares,
+                        int64_t reserve)
+{
+    if (amountPoolShares > totalPoolShares)
+    {
+        throw std::runtime_error("Invalid amountPoolShares");
+    }
+
+    return bigDivideOrThrow(amountPoolShares, reserve, totalPoolShares,
+                            ROUND_DOWN);
+}
+
+void
+maybeUpdateAccountOnLedgerSeqUpdate(LedgerTxnHeader const& header,
+                                    LedgerTxnEntry& account)
+{
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_19))
+    {
+        auto& v3 =
+            prepareAccountEntryExtensionV3(account.current().data.account());
+        v3.seqLedger = header.current().ledgerSeq;
+        v3.seqTime = header.current().scpValue.closeTime;
+    }
+}
+
+int64_t
+getMinFee(TransactionFrameBase const& tx, LedgerHeader const& header,
+          std::optional<int64_t> baseFee)
+{
+    int64_t effectiveBaseFee = header.baseFee;
+    if (baseFee)
+    {
+        effectiveBaseFee = std::max(effectiveBaseFee, *baseFee);
+    }
+    return effectiveBaseFee * std::max<int64_t>(1, tx.getNumOperations());
 }
 
 namespace detail
@@ -1119,5 +1856,26 @@ hasMuxedAccount(TransactionEnvelope const& e)
     detail::MuxChecker c;
     c(e);
     return c.mHasMuxedAccount;
+}
+
+ClaimAtom
+makeClaimAtom(uint32_t ledgerVersion, AccountID const& accountID,
+              int64_t offerID, Asset const& wheat, int64_t numWheatReceived,
+              Asset const& sheep, int64_t numSheepSend)
+{
+    ClaimAtom atom;
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_18))
+    {
+        atom.type(CLAIM_ATOM_TYPE_V0);
+        atom.v0() = ClaimOfferAtomV0(accountID.ed25519(), offerID, wheat,
+                                     numWheatReceived, sheep, numSheepSend);
+    }
+    else
+    {
+        atom.type(CLAIM_ATOM_TYPE_ORDER_BOOK);
+        atom.orderBook() = ClaimOfferAtom(
+            accountID, offerID, wheat, numWheatReceived, sheep, numSheepSend);
+    }
+    return atom;
 }
 } // namespace stellar

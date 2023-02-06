@@ -6,6 +6,7 @@
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "lib/catch.hpp"
+#include "lib/util/stdrandom.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "test/TestAccount.h"
@@ -33,13 +34,12 @@ using namespace stellar::txtest;
 // try setting high threshold ones without the correct sigs
 // make sure it doesn't allow us to add signers when we don't have the
 // minbalance
-TEST_CASE("set options", "[tx][setoptions]")
+TEST_CASE_VERSIONS("set options", "[tx][setoptions]")
 {
     Config const& cfg = getTestConfig();
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-    app->start();
 
     // set up world
     auto root = TestAccount::createRoot(*app);
@@ -323,7 +323,16 @@ TEST_CASE("set options", "[tx][setoptions]")
             auto signer2 = makeSigner(getAccount("S2"), 1);
 
             tooManySponsoring(*app, a1, a1.op(setOptions(setSigner(signer1))),
-                              a1.op(setOptions(setSigner(signer2))));
+                              a1.op(setOptions(setSigner(signer2))), 1);
+        }
+
+        SECTION("too many subentries")
+        {
+            auto signer1 = makeSigner(getAccount("S1"), 1);
+            auto signer2 = makeSigner(getAccount("S2"), 1);
+
+            tooManySubentries(*app, a1, setOptions(setSigner(signer1)),
+                              setOptions(setSigner(signer2)));
         }
 
         SECTION("delete signer that does not exist with sponsorships")
@@ -461,8 +470,8 @@ TEST_CASE("set options", "[tx][setoptions]")
                 std::vector<SecretKey> keys;
                 ops.emplace_back(root.op(setOptions(setSigner(signer))));
 
-                std::uniform_int_distribution<size_t> dist(0, 1);
-                if (dist(gRandomEngine))
+                stellar::uniform_int_distribution<size_t> dist(0, 1);
+                if (dist(Catch::rng()))
                 {
                     auto sk = SecretKey::pseudoRandomForTesting();
                     keys.emplace_back(sk);
@@ -503,12 +512,12 @@ TEST_CASE("set options", "[tx][setoptions]")
             };
 
             for_versions_from(14, *app, [&]() {
-                std::uniform_int_distribution<size_t> dist(0, 2);
+                stellar::uniform_int_distribution<size_t> dist(0, 2);
 
                 // 67% change to add, 33% chance to remove
                 while (signers.size() < MAX_SIGNERS)
                 {
-                    if (dist(gRandomEngine))
+                    if (dist(Catch::rng()))
                     {
                         addSigner();
                     }
@@ -521,7 +530,7 @@ TEST_CASE("set options", "[tx][setoptions]")
                 // 33% change to add, 67% chance to remove
                 while (!signers.empty())
                 {
-                    if (dist(gRandomEngine))
+                    if (dist(Catch::rng()))
                     {
                         removeSigner();
                     }
@@ -530,6 +539,38 @@ TEST_CASE("set options", "[tx][setoptions]")
                         addSigner();
                     }
                 }
+            });
+        }
+        SECTION("ed25519 payload signer")
+        {
+            SignerKey a1Signer;
+            a1Signer.type(SIGNER_KEY_TYPE_ED25519_SIGNED_PAYLOAD);
+            a1Signer.ed25519SignedPayload().ed25519 =
+                a1.getPublicKey().ed25519();
+            a1Signer.ed25519SignedPayload().payload.emplace_back('s');
+            Signer sk(a1Signer, 1);
+
+            a1Signer.ed25519SignedPayload().payload.clear();
+            Signer skEmptyPayload(a1Signer, 1);
+
+            for_versions_to(18, *app, [&]() {
+                REQUIRE_THROWS_AS(root.setOptions(setSigner(sk)),
+                                  ex_SET_OPTIONS_BAD_SIGNER);
+
+                REQUIRE_THROWS_AS(root.setOptions(setSigner(skEmptyPayload)),
+                                  ex_SET_OPTIONS_BAD_SIGNER);
+            });
+
+            for_versions_from(19, *app, [&]() {
+                root.setOptions(setSigner(sk));
+                REQUIRE(root.getNumSubEntries() == 1);
+
+                sk.weight = 0;
+                root.setOptions(setSigner(sk));
+                REQUIRE(root.getNumSubEntries() == 0);
+
+                REQUIRE_THROWS_AS(root.setOptions(setSigner(skEmptyPayload)),
+                                  ex_SET_OPTIONS_BAD_SIGNER);
             });
         }
     }

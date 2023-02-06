@@ -15,6 +15,9 @@
 #include "transactions/CreatePassiveSellOfferOpFrame.h"
 #include "transactions/EndSponsoringFutureReservesOpFrame.h"
 #include "transactions/InflationOpFrame.h"
+#include "transactions/InvokeHostFunctionOpFrame.h"
+#include "transactions/LiquidityPoolDepositOpFrame.h"
+#include "transactions/LiquidityPoolWithdrawOpFrame.h"
 #include "transactions/ManageBuyOfferOpFrame.h"
 #include "transactions/ManageDataOpFrame.h"
 #include "transactions/ManageSellOfferOpFrame.h"
@@ -28,6 +31,7 @@
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDRCereal.h"
 #include <Tracy.hpp>
 
@@ -74,7 +78,7 @@ OperationFrame::makeHelper(Operation const& op, OperationResult& res,
     case CHANGE_TRUST:
         return std::make_shared<ChangeTrustOpFrame>(op, res, tx);
     case ALLOW_TRUST:
-        return std::make_shared<AllowTrustOpFrame>(op, res, tx);
+        return std::make_shared<AllowTrustOpFrame>(op, res, tx, index);
     case ACCOUNT_MERGE:
         return std::make_shared<MergeOpFrame>(op, res, tx);
     case INFLATION:
@@ -105,7 +109,15 @@ OperationFrame::makeHelper(Operation const& op, OperationResult& res,
     case CLAWBACK_CLAIMABLE_BALANCE:
         return std::make_shared<ClawbackClaimableBalanceOpFrame>(op, res, tx);
     case SET_TRUST_LINE_FLAGS:
-        return std::make_shared<SetTrustLineFlagsOpFrame>(op, res, tx);
+        return std::make_shared<SetTrustLineFlagsOpFrame>(op, res, tx, index);
+    case LIQUIDITY_POOL_DEPOSIT:
+        return std::make_shared<LiquidityPoolDepositOpFrame>(op, res, tx);
+    case LIQUIDITY_POOL_WITHDRAW:
+        return std::make_shared<LiquidityPoolWithdrawOpFrame>(op, res, tx);
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case INVOKE_HOST_FUNCTION:
+        return std::make_shared<InvokeHostFunctionOpFrame>(op, res, tx);
+#endif
     default:
         ostringstream err;
         err << "Unknown Tx type: " << op.body.type();
@@ -143,7 +155,8 @@ OperationFrame::getThresholdLevel() const
     return ThresholdLevel::MEDIUM;
 }
 
-bool OperationFrame::isVersionSupported(uint32_t) const
+bool
+OperationFrame::isOpSupported(LedgerHeader const&) const
 {
     return true;
 }
@@ -209,14 +222,15 @@ OperationFrame::checkValid(SignatureChecker& signatureChecker,
     ZoneScoped;
     // Note: ltx is always rolled back so checkValid never modifies the ledger
     LedgerTxn ltx(ltxOuter);
-    auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
-    if (!isVersionSupported(ledgerVersion))
+    if (!isOpSupported(ltx.loadHeader().current()))
     {
         mResult.code(opNOT_SUPPORTED);
         return false;
     }
 
-    if (!forApply || ledgerVersion < 10)
+    auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+    if (!forApply ||
+        protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_10))
     {
         if (!checkSignature(signatureChecker, ltx, forApply))
         {

@@ -16,14 +16,13 @@
 using namespace stellar;
 using namespace stellar::txtest;
 
-TEST_CASE("clawbackClaimableBalance", "[tx][clawback][claimablebalance]")
+TEST_CASE_VERSIONS("clawbackClaimableBalance",
+                   "[tx][clawback][claimablebalance]")
 {
     Config const& cfg = getTestConfig();
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-
-    app->start();
 
     auto root = TestAccount::createRoot(*app);
 

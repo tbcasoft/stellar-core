@@ -8,6 +8,7 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/TrustLineWrapper.h"
 #include "transactions/TransactionUtils.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include <Tracy.hpp>
 
@@ -38,7 +39,8 @@ PathPaymentStrictReceiveOpFrame::doApply(AbstractLedgerTxn& ltx)
     setResultSuccess();
 
     bool doesSourceAccountExist = true;
-    if (ltx.loadHeader().current().ledgerVersion < 8)
+    if (protocolVersionIsBefore(ltx.loadHeader().current().ledgerVersion,
+                                ProtocolVersion::V_8))
     {
         doesSourceAccountExist =
             (bool)stellar::loadAccountWithoutRecord(ltx, getSourceID());
@@ -83,20 +85,21 @@ PathPaymentStrictReceiveOpFrame::doApply(AbstractLedgerTxn& ltx)
         }
 
         int64_t maxOffersToCross = INT64_MAX;
-        if (ltx.loadHeader().current().ledgerVersion >=
-            FIRST_PROTOCOL_SUPPORTING_OPERATION_LIMITS)
+        if (protocolVersionStartsFrom(
+                ltx.loadHeader().current().ledgerVersion,
+                FIRST_PROTOCOL_SUPPORTING_OPERATION_LIMITS))
         {
             size_t offersCrossed = innerResult().success().offers.size();
             // offersCrossed will never be bigger than INT64_MAX because
             // - the machine would have run out of memory
             // - the limit, which cannot exceed INT64_MAX, should be enforced
-            // so this subtraction is safe because MAX_OFFERS_TO_CROSS >= 0
-            maxOffersToCross = MAX_OFFERS_TO_CROSS - offersCrossed;
+            // so this subtraction is safe because getMaxOffersToCross() >= 0
+            maxOffersToCross = getMaxOffersToCross() - offersCrossed;
         }
 
         int64_t amountSend = 0;
         int64_t amountRecv = 0;
-        std::vector<ClaimOfferAtom> offerTrail;
+        std::vector<ClaimAtom> offerTrail;
         if (!convert(ltx, maxOffersToCross, sendAsset, INT64_MAX, amountSend,
                      recvAsset, maxAmountRecv, amountRecv,
                      RoundingType::PATH_PAYMENT_STRICT_RECEIVE, offerTrail))
@@ -135,17 +138,19 @@ PathPaymentStrictReceiveOpFrame::doCheckValid(uint32_t ledgerVersion)
         setResultMalformed();
         return false;
     }
-    if (!isAssetValid(mPathPayment.sendAsset) ||
-        !isAssetValid(mPathPayment.destAsset))
+    if (!isAssetValid(mPathPayment.sendAsset, ledgerVersion) ||
+        !isAssetValid(mPathPayment.destAsset, ledgerVersion))
     {
         setResultMalformed();
         return false;
     }
-    auto const& p = mPathPayment.path;
-    if (!std::all_of(p.begin(), p.end(), isAssetValid))
+    for (auto const& p : mPathPayment.path)
     {
-        setResultMalformed();
-        return false;
+        if (!isAssetValid(p, ledgerVersion))
+        {
+            setResultMalformed();
+            return false;
+        }
     }
     return true;
 }

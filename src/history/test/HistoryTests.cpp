@@ -403,7 +403,7 @@ TEST_CASE("Tx results verification", "[batching][resultsverification]")
             catchupSimulation.getApp().getClock().getIOContext(), true);
         out.open(ft.localPath_nogz());
         // Duplicate entries
-        for (int i = 0; i < entries.size(); ++i)
+        for (size_t i = 0; i < entries.size(); ++i)
         {
             out.writeOne(entries[0]);
         }
@@ -486,7 +486,8 @@ TEST_CASE("Publish works correctly post shadow removal", "[history]")
                                         uint32_t expectedLevelsCleared) {
         // Perform publish: 2 checkpoints (or 127 ledgers) correspond to 3
         // levels being initialized and partially filled in the bucketlist
-        sim.setProto12UpgradeLedger(upgradeLedger);
+        sim.setUpgradeLedger(upgradeLedger,
+                             Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED);
         auto checkpointLedger = sim.getLastCheckpointLedger(2);
         auto maxLevelTouched = 3;
         sim.ensureOfflineCatchupPossible(checkpointLedger);
@@ -504,7 +505,8 @@ TEST_CASE("Publish works correctly post shadow removal", "[history]")
     CatchupSimulation catchupSimulation{VirtualClock::VIRTUAL_TIME,
                                         configurator};
 
-    uint32_t oldProto = Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED - 1;
+    uint32_t oldProto =
+        static_cast<uint32_t>(Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED) - 1;
     catchupSimulation.generateRandomLedger(oldProto);
 
     // The next sections reflect how future buckets in HAS change, depending on
@@ -660,7 +662,7 @@ TEST_CASE("History catchup", "[history][catchup][acceptance]")
             "and closing ledger was externalized")
     {
         // 1 ledger is for publish-trigger, 1 ledger is catchup-trigger ledger,
-        // 3 ledgers are buffered, 1 ledger is cloding
+        // 3 ledgers are buffered, 1 ledger is closing
         catchupSimulation.ensureLedgerAvailable(checkpointLedger + 6);
         catchupSimulation.ensurePublishesComplete();
         REQUIRE(catchupSimulation.catchupOnline(app, checkpointLedger, 3));
@@ -713,6 +715,140 @@ TEST_CASE("History catchup with different modes",
     }
 }
 
+TEST_CASE("Retriggering catchups after trimming mSyncingLedgers",
+          "[history][catchup]")
+{
+    CatchupSimulation catchupSimulation{};
+
+    // Try to get to ledger 1000 with 200 ledgers buffered
+    // when there are 20 checkpoints available.
+    // In order to prevent mSyncingLedgers from growing indefinitely,
+    // it gets trimmed periodically.
+    // This test makes sure that we are able to catch up to the network
+    // even when some ledgers get trimmed from mSyncingLedgers.
+
+    const auto bufferLedgers = 200;
+    const auto initLedger = 1000;
+    const auto numCheckpointsAvailable = 20;
+
+    auto checkpointLedger =
+        catchupSimulation.getLastCheckpointLedger(numCheckpointsAvailable);
+    catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger);
+
+    auto app = catchupSimulation.createCatchupApplication(
+        std::numeric_limits<uint32_t>::max(), Config::TESTDB_IN_MEMORY_SQLITE,
+        std::string("Retriggering catchups after trimming mSyncingLedgers"));
+    auto& lm = app->getLedgerManager();
+
+    auto& hm = app->getHistoryManager();
+    auto& herder = static_cast<HerderImpl&>(app->getHerder());
+
+    auto runCatchup = [&](uint32_t expectedDestination) {
+        auto startCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
+
+        auto expectedCatchupWork =
+            catchupSimulation.computeCatchupPerformedWork(
+                lm.getLastClosedLedgerNum(),
+                CatchupConfiguration{expectedDestination,
+                                     app->getConfig().CATCHUP_RECENT,
+                                     CatchupConfiguration::Mode::ONLINE},
+                *app);
+
+        catchupSimulation.crankUntil(
+            app, [&]() { return app->getCatchupManager().catchupWorkIsDone(); },
+            std::chrono::seconds{
+                std::max<int64>(expectedCatchupWork.mTxSetsApplied + 15, 60)});
+
+        auto endCatchupMetrics = app->getCatchupManager().getCatchupMetrics();
+        auto catchupPerformedWork =
+            CatchupPerformedWork{endCatchupMetrics - startCatchupMetrics};
+
+        REQUIRE(catchupPerformedWork == expectedCatchupWork);
+    };
+
+    // Externalize (to the catchup LM) the range of ledgers between initLedger
+    // and as near as we can get to the first ledger of the block after
+    // initLedger (inclusive), so that there's something to knit-up with. Do not
+    // externalize anything we haven't yet published, of course.
+    const uint32_t firstLedgerInCheckpoint =
+        hm.firstLedgerAfterCheckpointContaining(initLedger);
+
+    const uint32_t triggerLedger =
+        hm.ledgerToTriggerCatchup(firstLedgerInCheckpoint);
+
+    // 1. The app hears initLedger, ..., dividingLedger - 1.
+    //    NB: dividingLedger must be chosen such that mSyncingLedgers gets
+    //    trimmed in this step.
+    // 2. We will let Catchup run right after hearing (dividingLedger - 1).
+    // 3. The app hears dividingLedger, ..., triggerLedger + bufferLedgers.
+    // 4. We will let Catchup run again.
+    auto runTest = [&](uint32_t const dividingLedger) {
+        // The app hears initLedger, ..., dividingLedger - 1.
+        for (uint32_t n = initLedger; n < dividingLedger; ++n)
+        {
+            catchupSimulation.externalizeLedger(herder, n);
+        }
+
+        // Let the catchup run.
+        // We expect that it'll land at the checkpoint containing (initLedger -
+        // 1). It can't apply the buffered ledgers because mSyncingLedgers must
+        // have popped some elements in order to prevent it from growing
+        // exponentially, and thus there is a gap between the LCL and
+        // mSyncingLedgers.
+        runCatchup(hm.checkpointContainingLedger(initLedger - 1));
+
+        // As mentioned above, mSyncingLedgers must have been trimmed
+        // after hearing up to (dividingLedger - 1).
+        // And if it has been trimmed, CatchupWork should not be able to catch
+        // up without being re-triggered.
+        REQUIRE(!lm.isSynced());
+
+        // In order to close the gap between the LCL and mSyncingLedgers,
+        // we need to run a CatchupWork again.
+        // processLedger is responsible for that, and thus we call it
+        // by externalizing ledgers.
+        for (uint32_t n = dividingLedger; n <= triggerLedger + bufferLedgers;
+             n++)
+        {
+            catchupSimulation.externalizeLedger(herder, n);
+        }
+
+        runCatchup(hm.lastLedgerBeforeCheckpointContaining(dividingLedger));
+
+        REQUIRE(lm.getLastClosedLedgerNum() == triggerLedger + bufferLedgers);
+        catchupSimulation.externalizeLedger(herder,
+                                            triggerLedger + bufferLedgers + 1);
+
+        REQUIRE(lm.isSynced());
+
+        REQUIRE(lm.getLastClosedLedgerNum() ==
+                triggerLedger + bufferLedgers + 1);
+
+        catchupSimulation.validateCatchup(app);
+    };
+
+    SECTION("Catchup runs twice to catch up")
+    {
+        auto dividingLedger = triggerLedger + bufferLedgers;
+        runTest(dividingLedger);
+    }
+
+    SECTION(
+        "mSyncingLedgers gets trimmed between the first and second Catchup run")
+    {
+        // When adding the second ledger in a checkpoint,
+        // we become certain that nodes started publishing the checkpoint.
+        // Thus the ledgers before the checkpoint will be trimmed.
+        // By setting dividingLedger to the second ledger in a checkpoint,
+        // we can make sure that mSyncingLedgers gets trimmed between the first
+        // and second Catchup run.
+        auto dividingLedger = hm.firstLedgerInCheckpointContaining(
+                                  triggerLedger + bufferLedgers) +
+                              1;
+        runTest(dividingLedger);
+    }
+}
+
 TEST_CASE("History prefix catchup", "[history][catchup]")
 {
     CatchupSimulation catchupSimulation{};
@@ -748,85 +884,75 @@ TEST_CASE("History prefix catchup", "[history][catchup]")
     REQUIRE(b->getLedgerManager().getLastClosedLedgerNum() == 2 * freq + 7);
 }
 
-TEST_CASE("Catchup post-shadow-removal works", "[history]")
+TEST_CASE("Catchup with protocol upgrade", "[catchup][history]")
 {
-    uint32_t newProto = Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED;
-    uint32_t oldProto = newProto - 1;
+    auto testUpgrade = [&](ProtocolVersion upgradeVersion) {
+        uint32_t oldVersion = static_cast<uint32_t>(upgradeVersion) - 1;
 
-    auto configurator =
-        std::make_shared<RealGenesisTmpDirHistoryConfigurator>();
-    CatchupSimulation catchupSimulation{VirtualClock::VIRTUAL_TIME,
-                                        configurator};
+        auto configurator =
+            std::make_shared<RealGenesisTmpDirHistoryConfigurator>();
+        CatchupSimulation catchupSimulation{VirtualClock::VIRTUAL_TIME,
+                                            configurator};
 
-    catchupSimulation.generateRandomLedger(oldProto);
+        catchupSimulation.generateRandomLedger(oldVersion);
+        std::vector<uint32_t> catchupLedgers = {
+            0, std::numeric_limits<uint32_t>::max(), 32, 60};
+        auto executeUpgrade = [&](uint32_t upgradeLedger) {
+            catchupSimulation.setUpgradeLedger(upgradeLedger, upgradeVersion);
+            auto checkpointLedger =
+                catchupSimulation.getLastCheckpointLedger(3);
+            catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger);
 
-    // Different counts: with proto 12, catchup should adapt and switch merge
-    // logic
-    std::vector<uint32_t> counts = {0, std::numeric_limits<uint32_t>::max(),
-                                    60};
+            for (auto count : catchupLedgers)
+            {
+                auto a = catchupSimulation.createCatchupApplication(
+                    count, Config::TESTDB_IN_MEMORY_SQLITE,
+                    std::string("full, ") + resumeModeName(count) + ", " +
+                        dbModeName(Config::TESTDB_IN_MEMORY_SQLITE));
 
-    SECTION("Upgrade at checkpoint start")
-    {
-        uint32_t upgradeLedger = 64;
-        catchupSimulation.setProto12UpgradeLedger(upgradeLedger);
-        auto checkpointLedger = catchupSimulation.getLastCheckpointLedger(3);
-        catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger);
+                REQUIRE(catchupSimulation.catchupOnline(a, checkpointLedger));
+            }
+        };
 
-        for (auto count : counts)
+        SECTION("Upgrade at checkpoint start")
         {
-            auto a = catchupSimulation.createCatchupApplication(
-                count, Config::TESTDB_IN_MEMORY_SQLITE,
-                std::string("full, ") + resumeModeName(count) + ", " +
-                    dbModeName(Config::TESTDB_IN_MEMORY_SQLITE));
-
-            REQUIRE(catchupSimulation.catchupOnline(a, checkpointLedger));
+            executeUpgrade(64);
         }
-    }
-    SECTION("Upgrade mid-checkpoint")
-    {
-        // Notice the effect of shifting the upgrade by one ledger:
-        // At ledger 64, spills of levels 1,2,3 occur, starting merges with
-        // _old-style_ logic.
-        // Then at ledger 65, an upgrade happens, but old merges are still valid
-        uint32_t upgradeLedger = 65;
-        catchupSimulation.setProto12UpgradeLedger(upgradeLedger);
-        auto checkpointLedger = catchupSimulation.getLastCheckpointLedger(3);
-        catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger);
-
-        for (auto count : counts)
+        SECTION("Upgrade right after checkpoint start")
         {
-            auto a = catchupSimulation.createCatchupApplication(
-                count, Config::TESTDB_IN_MEMORY_SQLITE,
-                std::string("full, ") + resumeModeName(count) + ", " +
-                    dbModeName(Config::TESTDB_IN_MEMORY_SQLITE));
-
-            REQUIRE(catchupSimulation.catchupOnline(a, checkpointLedger));
+            executeUpgrade(65);
         }
-    }
-    SECTION("Apply-buckets old-style merges, upgrade during tx replay")
+
+        SECTION("Upgrade mid-checkpoint")
+        {
+            executeUpgrade(80);
+        }
+
+        SECTION("Upgrade at checkpoint end")
+        {
+            executeUpgrade(127);
+        }
+    };
+    SECTION("post-shadow-removal upgrade")
     {
-        // Ensure that ApplyBucketsWork correctly restarts old-style merges
-        // during catchup. Upgrade happens at ledger 70, so catchup applies
-        // buckets for the first checkpoint, then replays ledgers 64...127.
-        uint32_t upgradeLedger = 70;
-        catchupSimulation.setProto12UpgradeLedger(upgradeLedger);
-        auto checkpointLedger = catchupSimulation.getLastCheckpointLedger(2);
-        catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger);
+        testUpgrade(Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED);
+    }
+    SECTION("generalized tx set upgrade")
+    {
 
-        auto a = catchupSimulation.createCatchupApplication(
-            32, Config::TESTDB_IN_MEMORY_SQLITE,
-            std::string("full, ") + resumeModeName(32) + ", " +
-                dbModeName(Config::TESTDB_IN_MEMORY_SQLITE));
-
-        REQUIRE(catchupSimulation.catchupOnline(a, checkpointLedger));
+        if (protocolVersionStartsFrom(Config::CURRENT_LEDGER_PROTOCOL_VERSION,
+                                      GENERALIZED_TX_SET_PROTOCOL_VERSION))
+        {
+            testUpgrade(GENERALIZED_TX_SET_PROTOCOL_VERSION);
+        }
     }
 }
 
 TEST_CASE("Catchup non-initentry buckets to initentry-supporting works",
           "[history][bucket][acceptance]")
 {
-    uint32_t newProto =
-        Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY;
+    uint32_t newProto = static_cast<uint32_t>(
+        Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY);
     uint32_t oldProto = newProto - 1;
     auto configurator =
         std::make_shared<RealGenesisTmpDirHistoryConfigurator>();
@@ -864,15 +990,15 @@ TEST_CASE("Catchup non-initentry buckets to initentry-supporting works",
             auto stranger = TestAccount{
                 *a, txtest::getAccount(fmt::format("stranger{}", i))};
             auto& lm = a->getLedgerManager();
-            TxSetFramePtr txSet = std::make_shared<TxSetFrame>(
-                lm.getLastClosedLedgerHeader().hash);
             uint32_t ledgerSeq = lm.getLastClosedLedgerNum() + 1;
             uint64_t minBalance = lm.getLastMinBalance(5);
             uint64_t big = minBalance + ledgerSeq;
             uint64_t closeTime = 60 * 5 * ledgerSeq;
-            txSet->add(root.tx({txtest::createAccount(stranger, big)}));
-            // Provoke sortForHash and hash-caching:
-            txSet->getContentsHash();
+
+            TxSetFrameConstPtr txSet = TxSetFrame::makeFromTransactions(
+                TxSetFrame::Transactions{
+                    root.tx({txtest::createAccount(stranger, big)})},
+                *a, 0, 0);
 
             // On first iteration of advance, perform a ledger-protocol version
             // upgrade to the new protocol, to activate INITENTRY behaviour.
@@ -975,8 +1101,8 @@ TEST_CASE("Publish catchup via s3", "[!hide][s3]")
     REQUIRE(catchupSimulation.catchupOnline(app, checkpointLedger, 5));
 }
 
-TEST_CASE("HAS in publishqueue remains in pristine state until publish",
-          "[history]")
+TEST_CASE_VERSIONS(
+    "HAS in publishqueue remains in pristine state until publish", "[history]")
 {
     // In this test we generate some buckets and cause a checkpoint to be
     // published, checking that the (cached) set of buckets referenced by the
@@ -998,7 +1124,6 @@ TEST_CASE("HAS in publishqueue remains in pristine state until publish",
     BucketTests::for_versions_with_differing_bucket_logic(
         cfg, [&](Config const& cfg) {
             Application::pointer app = createTestApplication(clock, cfg);
-            app->start();
             auto& hm = app->getHistoryManager();
             auto& lm = app->getLedgerManager();
             auto& bl = app->getBucketManager().getBucketList();
@@ -1053,7 +1178,6 @@ TEST_CASE("persist publish queue", "[history][publish][acceptance]")
     {
         VirtualClock clock;
         Application::pointer app0 = createTestApplication(clock, cfg);
-        app0->start();
         auto& hm0 = app0->getHistoryManager();
         while (hm0.getPublishQueueCount() < 5)
         {
@@ -1198,7 +1322,7 @@ TEST_CASE("Catchup manual", "[history][catchup][acceptance]")
     auto dbMode = Config::TESTDB_IN_MEMORY_SQLITE;
 
     // Test every 10th scenario
-    for (auto i = 0; i < stellar::gCatchupRangeCases.size(); i += 10)
+    for (size_t i = 0; i < stellar::gCatchupRangeCases.size(); i += 10)
     {
         auto test = stellar::gCatchupRangeCases[i];
         auto configuration = test.second;
@@ -1257,8 +1381,13 @@ TEST_CASE("Catchup failure recovery with buffered checkpoint",
     catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger, 63);
 
     // Now start a catchup on that catchups as far as it can due to gap
+    // ledger 133 (= init + 60) will be missing.
+    // The app hears up to ledger 189 close. (189 = 129 + 60 where 129
+    // is the trigger ledger and 60 is the number of ledgers to buffer.)
+    // Then mSyncingLedgers = {128, 129, ..., 132, 134, ..., 189}.
+    // We get up to 127 using checkpoint data, and apply {128, ..., 132}.
     LOG_INFO(DEFAULT_LOG, "Starting catchup (with gap) from {}", init);
-    REQUIRE(!catchupSimulation.catchupOnline(app, init, 115, init + 60));
+    REQUIRE(!catchupSimulation.catchupOnline(app, init, 60, init + 60));
     REQUIRE(app->getLedgerManager().getLastClosedLedgerNum() == 132);
 
     // Now generate a little more history
@@ -1266,10 +1395,10 @@ TEST_CASE("Catchup failure recovery with buffered checkpoint",
     catchupSimulation.ensureOnlineCatchupPossible(checkpointLedger, 5);
 
     // 1. LCL is 132
-    // 2. CatchupManager should still have 192 and 193 buffered after previous
-    //    catchup failed so we don't have to wait for the next checkpoint
-    // 3. Catchup to 191, and then externalize 194 to start catchup
-    CHECK(catchupSimulation.catchupOnline(app, checkpointLedger, 1, 191, 3));
+    // 2. CatchupManager has ledgers up to 189.
+    //    Once it hears ledger 192 close, it removes ledgers <= 191.
+    // 3. Catchup to 191 = initLedger, and then externalize 194 to start catchup
+    CHECK(catchupSimulation.catchupOnline(app, checkpointLedger, 1));
 }
 
 TEST_CASE("Change ordering of buffered ledgers", "[history][catchup]")
@@ -1335,20 +1464,19 @@ TEST_CASE("Introduce and fix gap without starting catchup",
     catchupSimulation.externalizeLedger(herder, nextLedger + 3);
     catchupSimulation.externalizeLedger(herder, nextLedger + 5);
     REQUIRE(!lm.isSynced());
-    REQUIRE(cm.hasBufferedLedger());
+    REQUIRE(cm.getLargestLedgerSeqHeard() > lm.getLastClosedLedgerNum());
 
     // Fill in the first gap. There will still be buffered ledgers left because
     // of the second gap
     catchupSimulation.externalizeLedger(herder, nextLedger + 1);
     REQUIRE(!lm.isSynced());
-    REQUIRE(cm.hasBufferedLedger());
-    REQUIRE(cm.getFirstBufferedLedger().getLedgerSeq() == nextLedger + 5);
+    REQUIRE(cm.getLargestLedgerSeqHeard() > lm.getLastClosedLedgerNum());
 
     // Fill in the second gap. All buffered ledgers should be applied, but we
     // wait for another ledger to close to get in sync
     catchupSimulation.externalizeLedger(herder, nextLedger + 4);
     REQUIRE(lm.isSynced());
-    REQUIRE(!cm.hasBufferedLedger());
+    REQUIRE(cm.getLargestLedgerSeqHeard() == lm.getLastClosedLedgerNum());
     REQUIRE(!cm.isCatchupInitialized());
     REQUIRE(lm.getLastClosedLedgerNum() == nextLedger + 5);
 }
@@ -1382,7 +1510,7 @@ TEST_CASE("Receive trigger and checkpoint ledger out of order",
     catchupSimulation.externalizeLedger(herder, checkpointLedger + 2);
 
     REQUIRE(lm.isSynced());
-    REQUIRE(!cm.hasBufferedLedger());
+    REQUIRE(cm.getLargestLedgerSeqHeard() == lm.getLastClosedLedgerNum());
     REQUIRE(!cm.isCatchupInitialized());
     REQUIRE(app->getLedgerManager().getLastClosedLedgerNum() ==
             checkpointLedger + 2);

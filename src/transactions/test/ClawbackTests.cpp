@@ -15,14 +15,12 @@
 using namespace stellar;
 using namespace stellar::txtest;
 
-TEST_CASE("clawback", "[tx][clawback]")
+TEST_CASE_VERSIONS("clawback", "[tx][clawback]")
 {
     Config const& cfg = getTestConfig();
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-
-    app->start();
 
     auto root = TestAccount::createRoot(*app);
 

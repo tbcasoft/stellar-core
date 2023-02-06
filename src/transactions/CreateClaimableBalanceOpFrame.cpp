@@ -10,22 +10,11 @@
 #include "ledger/TrustLineWrapper.h"
 #include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
+#include "util/GlobalChecks.h"
+#include "util/ProtocolVersion.h"
 
 namespace stellar
 {
-
-static void
-setClaimableBalanceClawbackEnabled(ClaimableBalanceEntry& cb)
-{
-    if (cb.ext.v() != 0)
-    {
-        throw std::runtime_error(
-            "unexpected ClaimableBalanceEntry ext version");
-    }
-
-    cb.ext.v(1);
-    cb.ext.v1().flags = CLAIMABLE_BALANCE_CLAWBACK_ENABLED_FLAG;
-}
 
 static int64_t
 relativeToAbsolute(TimePoint closeTime, int64_t relative)
@@ -144,10 +133,10 @@ CreateClaimableBalanceOpFrame::CreateClaimableBalanceOpFrame(
 }
 
 bool
-CreateClaimableBalanceOpFrame::isVersionSupported(
-    uint32_t protocolVersion) const
+CreateClaimableBalanceOpFrame::isOpSupported(LedgerHeader const& header) const
 {
-    return protocolVersion >= 14;
+    return protocolVersionStartsFrom(header.ledgerVersion,
+                                     ProtocolVersion::V_14);
 }
 
 bool
@@ -177,7 +166,7 @@ CreateClaimableBalanceOpFrame::doApply(AbstractLedgerTxn& ltx)
         }
 
         auto amountOk = addBalance(header, sourceAccount, -amount);
-        assert(amountOk);
+        releaseAssertOrThrow(amountOk);
     }
     else
     {
@@ -199,7 +188,8 @@ CreateClaimableBalanceOpFrame::doApply(AbstractLedgerTxn& ltx)
             return false;
         }
 
-        if (header.current().ledgerVersion >= 17)
+        if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                      ProtocolVersion::V_17))
         {
             bool enableClawback;
             if (getSourceID() == getIssuer(asset))
@@ -264,7 +254,7 @@ CreateClaimableBalanceOpFrame::doCheckValid(uint32_t ledgerVersion)
 {
     auto const& claimants = mCreateClaimableBalance.claimants;
 
-    if (!isAssetValid(mCreateClaimableBalance.asset) ||
+    if (!isAssetValid(mCreateClaimableBalance.asset, ledgerVersion) ||
         mCreateClaimableBalance.amount <= 0 || claimants.empty())
     {
         innerResult().code(CREATE_CLAIMABLE_BALANCE_MALFORMED);
@@ -310,12 +300,12 @@ CreateClaimableBalanceOpFrame::insertLedgerKeysToPrefetch(
 Hash
 CreateClaimableBalanceOpFrame::getBalanceID()
 {
-    OperationID operationID;
-    operationID.type(ENVELOPE_TYPE_OP_ID);
-    operationID.id().sourceAccount = toMuxedAccount(mParentTx.getSourceID());
-    operationID.id().seqNum = mParentTx.getSeqNum();
-    operationID.id().opNum = mOpIndex;
+    HashIDPreimage hashPreimage;
+    hashPreimage.type(ENVELOPE_TYPE_OP_ID);
+    hashPreimage.operationID().sourceAccount = mParentTx.getSourceID();
+    hashPreimage.operationID().seqNum = mParentTx.getSeqNum();
+    hashPreimage.operationID().opNum = mOpIndex;
 
-    return xdrSha256(operationID);
+    return xdrSha256(hashPreimage);
 }
 }

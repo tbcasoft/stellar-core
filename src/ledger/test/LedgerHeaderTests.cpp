@@ -69,8 +69,7 @@ TEST_CASE("ledgerheader", "[ledger]")
         app->start();
 
         auto const& lcl = app->getLedgerManager().getLastClosedLedgerHeader();
-        auto const& lastHash = lcl.hash;
-        TxSetFramePtr txSet = make_shared<TxSetFrame>(lastHash);
+        auto txSet = TxSetFrame::makeEmpty(lcl);
 
         // close this ledger
         StellarValue sv = app->getHerder().makeStellarValue(
@@ -95,14 +94,12 @@ TEST_CASE("ledgerheader", "[ledger]")
     }
 }
 
-TEST_CASE("base reserve", "[ledger]")
+TEST_CASE_VERSIONS("base reserve", "[ledger]")
 {
     Config const& cfg = getTestConfig();
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-
-    app->start();
 
     auto const& lcl = app->getLedgerManager().getLastClosedLedgerHeader();
     REQUIRE(lcl.header.baseReserve == 100000000);

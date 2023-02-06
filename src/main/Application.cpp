@@ -31,15 +31,16 @@ validateNetworkPassphrase(Application::pointer app)
     else if (networkPassphrase != prevNetworkPassphrase)
     {
         throw std::invalid_argument(
-            fmt::format("NETWORK_PASSPHRASE \"{}\" does not match"
-                        " previous NETWORK_PASSPHRASE \"{}\"",
+            fmt::format(FMT_STRING("NETWORK_PASSPHRASE \"{}\" does not match"
+                                   " previous NETWORK_PASSPHRASE \"{}\""),
                         networkPassphrase, prevNetworkPassphrase));
     }
 }
 
 Application::pointer
-Application::create(VirtualClock& clock, Config const& cfg, bool newDB)
+Application::create(VirtualClock& clock, Config const& cfg, bool newDB,
+                    bool forceRebuild)
 {
-    return create<ApplicationImpl>(clock, cfg, newDB);
+    return create<ApplicationImpl>(clock, cfg, newDB, forceRebuild);
 }
 }

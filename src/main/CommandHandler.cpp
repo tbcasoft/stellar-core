@@ -18,9 +18,15 @@
 #include "overlay/BanManager.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/SurveyManager.h"
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+#include "ledger/InternalLedgerEntry.h"
+#include "ledger/LedgerTxnImpl.h"
+#include "transactions/InvokeHostFunctionOpFrame.h"
+#endif
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include "util/StatusManager.h"
 #include <Tracy.hpp>
 #include <fmt/format.h>
@@ -29,11 +35,14 @@
 #include "util/Decoder.h"
 #include "util/XDRCereal.h"
 #include "util/XDROperators.h"
+#include "xdr/Stellar-ledger-entries.h"
+#include "xdr/Stellar-transaction.h"
 #include "xdrpp/marshal.h"
 
 #include "ExternalQueue.h"
 
 #ifdef BUILD_TESTS
+#include "simulation/LoadGenerator.h"
 #include "test/TestAccount.h"
 #include "test/TxTests.h"
 #endif
@@ -75,7 +84,7 @@ CommandHandler::CommandHandler(Application& app) : mApp(app)
 
     mServer->add404(std::bind(&CommandHandler::fileNotFound, this, _1, _2));
 
-    if (mApp.getConfig().MODE_STORES_HISTORY)
+    if (mApp.getConfig().modeStoresAnyHistory())
     {
         addRoute("dropcursor", &CommandHandler::dropcursor);
         addRoute("getcursor", &CommandHandler::getcursor);
@@ -106,6 +115,10 @@ CommandHandler::CommandHandler(Application& app) : mApp(app)
     addRoute("manualclose", &CommandHandler::manualClose);
     addRoute("metrics", &CommandHandler::metrics);
     addRoute("tx", &CommandHandler::tx);
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    addRoute("preflight", &CommandHandler::preflight);
+    addRoute("getledgerentry", &CommandHandler::getLedgerEntry);
+#endif
     addRoute("upgrades", &CommandHandler::upgrades);
     addRoute("self-check", &CommandHandler::selfCheck);
 
@@ -136,7 +149,7 @@ CommandHandler::safeRouter(CommandHandler::HandlerRoute route,
     }
     catch (std::exception const& e)
     {
-        retStr = fmt::format(R"({{"exception": "{}"}})", e.what());
+        retStr = fmt::format(FMT_STRING(R"({{"exception": "{}"}})"), e.what());
     }
     catch (...)
     {
@@ -183,7 +196,7 @@ parseOptionalParam(std::map<std::string, std::string> const& map,
         if (str.fail() || !str.eof())
         {
             std::string errorMsg =
-                fmt::format("Failed to parse '{}' argument", key);
+                fmt::format(FMT_STRING("Failed to parse '{}' argument"), key);
             throw std::runtime_error(errorMsg);
         }
         return std::make_optional<T>(val);
@@ -221,7 +234,8 @@ parseRequiredParam(std::map<std::string, std::string> const& map,
     auto res = parseOptionalParam<T>(map, key);
     if (!res)
     {
-        std::string errorMsg = fmt::format("'{}' argument is required!", key);
+        std::string errorMsg =
+            fmt::format(FMT_STRING("'{}' argument is required!"), key);
         throw std::runtime_error(errorMsg);
     }
     return *res;
@@ -255,6 +269,9 @@ CommandHandler::peers(std::string const& params, std::string& retStr)
     http::server::server::parseParams(params, retMap);
 
     bool fullKeys = retMap["fullkeys"] == "true";
+    // compact should be true by default
+    // as the response can be quite verbose.
+    bool compact = retMap["compact"] != "false";
     Json::Value root;
 
     auto& pendingPeers = root["pending_peers"];
@@ -281,11 +298,7 @@ CommandHandler::peers(std::string const& params, std::string& retStr)
             for (auto const& peer : peers)
             {
                 auto& peerNode = node[counter++];
-                peerNode["address"] = peer.second->toString();
-                peerNode["elapsed"] = (int)peer.second->getLifeTime().count();
-                peerNode["latency"] = (int)peer.second->getPing().count();
-                peerNode["ver"] = peer.second->getRemoteVersion();
-                peerNode["olver"] = (int)peer.second->getRemoteOverlayVersion();
+                peerNode = peer.second->getJsonInfo(compact);
                 peerNode["id"] =
                     mApp.getConfig().toStrKey(peer.first, fullKeys);
             }
@@ -305,13 +318,67 @@ CommandHandler::info(std::string const&, std::string& retStr)
     retStr = mApp.getJsonInfo().toStyledString();
 }
 
+static bool
+shouldEnable(std::set<std::string> const& toEnable,
+             medida::MetricName const& name)
+{
+    // Enable individual metric name or a partition
+    if (toEnable.find(name.domain()) == toEnable.end() &&
+        toEnable.find(name.ToString()) == toEnable.end())
+    {
+        return false;
+    }
+    return true;
+}
+
 void
 CommandHandler::metrics(std::string const& params, std::string& retStr)
 {
     ZoneScoped;
+
+    std::map<std::string, std::string> retMap;
+    http::server::server::parseParams(params, retMap);
+    std::set<std::string> toEnable;
+
+    // Filter which metrics to report based on the parameters
+    auto metricToEnable = retMap.find("enable");
+    if (metricToEnable != retMap.end())
+    {
+        std::stringstream ss(metricToEnable->second);
+        std::string metric;
+
+        while (getline(ss, metric, ','))
+        {
+            toEnable.insert(metric);
+        }
+    }
+
     mApp.syncAllMetrics();
-    medida::reporting::JsonReporter jr(mApp.getMetrics());
-    retStr = jr.Report();
+
+    auto reportMetrics =
+        [&](std::map<medida::MetricName,
+                     std::shared_ptr<medida::MetricInterface>> const& metrics) {
+            medida::reporting::JsonReporter jr(metrics);
+            retStr = jr.Report();
+        };
+
+    if (!toEnable.empty())
+    {
+        std::map<medida::MetricName, std::shared_ptr<medida::MetricInterface>>
+            metricsToReport;
+        for (auto const& m : mApp.getMetrics().GetAllMetrics())
+        {
+            if (shouldEnable(toEnable, m.first))
+            {
+                metricsToReport.emplace(m);
+            }
+        }
+        reportMetrics(metricsToReport);
+    }
+    else
+    {
+        reportMetrics(mApp.getMetrics().GetAllMetrics());
+    }
 }
 
 void
@@ -469,19 +536,20 @@ CommandHandler::upgrades(std::string const& params, std::string& retStr)
         {
             tm = VirtualClock::isoStringToTm(upgradeTime);
         }
-        catch (std::exception)
+        catch (std::exception&)
         {
-            retStr =
-                fmt::format("could not parse upgradetime: '{}'", upgradeTime);
+            retStr = fmt::format(
+                FMT_STRING("could not parse upgradetime: '{}'"), upgradeTime);
             return;
         }
         p.mUpgradeTime = VirtualClock::tmToSystemPoint(tm);
 
         p.mBaseFee = parseOptionalParam<uint32>(retMap, "basefee");
         p.mBaseReserve = parseOptionalParam<uint32>(retMap, "basereserve");
-        p.mMaxTxSize = parseOptionalParam<uint32>(retMap, "maxtxsize");
+        p.mMaxTxSetSize = parseOptionalParam<uint32>(retMap, "maxtxsetsize");
         p.mProtocolVersion =
             parseOptionalParam<uint32>(retMap, "protocolversion");
+        p.mFlags = parseOptionalParam<uint32>(retMap, "flags");
 
         mApp.getHerder().setUpgrades(p);
     }
@@ -492,7 +560,7 @@ CommandHandler::upgrades(std::string const& params, std::string& retStr)
     }
     else
     {
-        retStr = fmt::format("Unknown mode: {}", s);
+        retStr = fmt::format(FMT_STRING("Unknown mode: {}"), s);
     }
 }
 
@@ -500,7 +568,12 @@ void
 CommandHandler::selfCheck(std::string const&, std::string& retStr)
 {
     ZoneScoped;
-    mApp.getHistoryArchiveManager().scheduleHistoryArchiveReportWork();
+    // NB: this only runs the online "self-check" routine; running the
+    // offline "self-check" from command-line will also do an expensive,
+    // synchronous database-vs-bucketlist consistency check. We can't do
+    // that online since it would block for so long that the node would
+    // lose sync. So we just omit it here.
+    mApp.scheduleSelfCheck(true);
 }
 
 void
@@ -590,24 +663,91 @@ CommandHandler::ll(std::string const& params, std::string& retStr)
     retStr = root.toStyledString();
 }
 
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+void
+CommandHandler::preflight(std::string const& params, std::string& retStr)
+{
+    ZoneScoped;
+    Json::Value root;
+
+    std::map<std::string, std::string> paramMap;
+    http::server::server::parseParams(params, paramMap);
+    std::string blob = paramMap["blob"];
+    if (!blob.empty())
+    {
+        InvokeHostFunctionOp op;
+        std::vector<uint8_t> binBlob;
+        fromOpaqueBase64(op, blob);
+        root = InvokeHostFunctionOpFrame::preflight(mApp, op);
+    }
+    else
+    {
+        throw std::invalid_argument(
+            "Must specify an InvokeHostFunctionOp blob: preflight?blob=<op in "
+            "base64 XDR format>");
+    }
+    retStr = Json::FastWriter().write(root);
+}
+
+void
+CommandHandler::getLedgerEntry(std::string const& params, std::string& retStr)
+{
+    ZoneScoped;
+    Json::Value root;
+
+    std::map<std::string, std::string> paramMap;
+    http::server::server::parseParams(params, paramMap);
+    std::string key = paramMap["key"];
+    if (!key.empty())
+    {
+        LedgerTxn ltx(mApp.getLedgerTxnRoot());
+        root["ledger"] = ltx.loadHeader().current().ledgerSeq;
+
+        LedgerKey k;
+        fromOpaqueBase64(k, key);
+        auto le = ltx.loadWithoutRecord(k);
+        if (le)
+        {
+            root["state"] = "live";
+            root["entry"] = toOpaqueBase64(le.current());
+        }
+        else
+        {
+            root["state"] = "dead";
+        }
+    }
+    else
+    {
+        throw std::invalid_argument(
+            "Must specify ledger key: getLedgerEntry?key=<LedgerKey in base64 "
+            "XDR format>");
+    }
+    retStr = Json::FastWriter().write(root);
+}
+
+#endif
+
 void
 CommandHandler::tx(std::string const& params, std::string& retStr)
 {
     ZoneScoped;
-    std::ostringstream output;
+    Json::Value root;
 
-    const std::string prefix("?blob=");
-    if (params.compare(0, prefix.size(), prefix) == 0)
+    std::map<std::string, std::string> paramMap;
+    http::server::server::parseParams(params, paramMap);
+    std::string blob = paramMap["blob"];
+
+    if (!blob.empty())
     {
         TransactionEnvelope envelope;
-        std::string blob = params.substr(prefix.size());
         std::vector<uint8_t> binBlob;
         decoder::decode_b64(blob, binBlob);
         xdr::xdr_from_opaque(binBlob, envelope);
 
         {
             auto lhhe = mApp.getLedgerManager().getLastClosedLedgerHeader();
-            if (lhhe.header.ledgerVersion >= 13)
+            if (protocolVersionStartsFrom(lhhe.header.ledgerVersion,
+                                          ProtocolVersion::V_13))
             {
                 envelope = txbridge::convertForV13(envelope);
             }
@@ -617,15 +757,11 @@ CommandHandler::tx(std::string const& params, std::string& retStr)
             mApp.getNetworkID(), envelope);
         if (transaction)
         {
-            // add it to our current set
-            // and make sure it is valid
+            // Add it to our current set and make sure it is valid.
             TransactionQueue::AddResult status =
-                mApp.getHerder().recvTransaction(transaction);
+                mApp.getHerder().recvTransaction(transaction, true);
 
-            output << "{"
-                   << "\"status\": "
-                   << "\"" << TX_STATUS_STRING[static_cast<int>(status)]
-                   << "\"";
+            root["status"] = TX_STATUS_STRING[static_cast<int>(status)];
             if (status == TransactionQueue::AddResult::ADD_STATUS_ERROR)
             {
                 std::string resultBase64;
@@ -633,19 +769,17 @@ CommandHandler::tx(std::string const& params, std::string& retStr)
                 resultBase64.reserve(decoder::encoded_size64(resultBin.size()) +
                                      1);
                 resultBase64 = decoder::encode_b64(resultBin);
-
-                output << " , \"error\": \"" << resultBase64 << "\"";
+                root["error"] = resultBase64;
             }
-            output << "}";
         }
     }
     else
     {
         throw std::invalid_argument("Must specify a tx blob: tx?blob=<tx in "
-                                    "xdr format>\"}");
+                                    "xdr format>");
     }
 
-    retStr = output.str();
+    retStr = Json::FastWriter().write(root);
 }
 
 void
@@ -751,13 +885,21 @@ CommandHandler::clearMetrics(std::string const& params, std::string& retStr)
 
     mApp.clearMetrics(domain);
 
-    retStr = fmt::format("Cleared {} metrics!", domain);
+    retStr = fmt::format(FMT_STRING("Cleared {} metrics!"), domain);
 }
 
 void
 CommandHandler::surveyTopology(std::string const& params, std::string& retStr)
 {
     ZoneScoped;
+
+    if (mApp.getState() == Application::APP_CREATED_STATE ||
+        mApp.getHerder().getState() == Herder::HERDER_BOOTING_STATE)
+    {
+        throw std::runtime_error(
+            "Application is not fully booted, try again later");
+    }
+
     std::map<std::string, std::string> map;
     http::server::server::parseParams(params, map);
 
@@ -805,21 +947,9 @@ CommandHandler::generateLoad(std::string const& params, std::string& retStr)
         std::map<std::string, std::string> map;
         http::server::server::parseParams(params, map);
 
-        bool isCreate;
-        std::string mode =
-            parseOptionalParamOrDefault<std::string>(map, "mode", "create");
-        if (mode == std::string("create"))
-        {
-            isCreate = true;
-        }
-        else if (mode == std::string("pay"))
-        {
-            isCreate = false;
-        }
-        else
-        {
-            throw std::runtime_error("Unknown mode.");
-        }
+        LoadGenMode mode = LoadGenerator::getMode(
+            parseOptionalParamOrDefault<std::string>(map, "mode", "create"));
+        bool isCreate = mode == LoadGenMode::CREATE;
 
         uint32_t nAccounts =
             parseOptionalParamOrDefault<uint32_t>(map, "accounts", 1000);
@@ -845,11 +975,12 @@ CommandHandler::generateLoad(std::string const& params, std::string& retStr)
             retStr = "Setting batch size to its limit of 100.";
         }
 
-        mApp.generateLoad(isCreate, nAccounts, offset, nTxs, txRate, batchSize,
+        mApp.generateLoad(mode, nAccounts, offset, nTxs, txRate, batchSize,
                           spikeInterval, spikeSize);
 
-        retStr += fmt::format(" Generating load: {:d} {:s}, {:d} tx/s",
-                              numItems, itemType, txRate);
+        retStr +=
+            fmt::format(FMT_STRING(" Generating load: {:d} {:s}, {:d} tx/s"),
+                        numItems, itemType, txRate);
     }
     else
     {
@@ -948,7 +1079,7 @@ CommandHandler::testTx(std::string const& params, std::string& retStr)
             txFrame = fromAccount.tx({payment(toAccount, paymentAmount)});
         }
 
-        auto status = mApp.getHerder().recvTransaction(txFrame);
+        auto status = mApp.getHerder().recvTransaction(txFrame, true);
         root["status"] = TX_STATUS_STRING[static_cast<int>(status)];
         if (status == TransactionQueue::AddResult::ADD_STATUS_ERROR)
         {

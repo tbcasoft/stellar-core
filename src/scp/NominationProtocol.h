@@ -41,8 +41,6 @@ class NominationProtocol
     Value mPreviousValue;
 
     bool isNewerStatement(NodeID const& nodeID, SCPNomination const& st);
-    static bool isNewerStatement(SCPNomination const& oldst,
-                                 SCPNomination const& st);
 
     // returns true if 'p' is a subset of 'v'
     // also sets 'notEqual' if p and v differ
@@ -96,6 +94,9 @@ class NominationProtocol
         std::chrono::milliseconds(0);
 
   public:
+    static bool isNewerStatement(SCPNomination const& oldst,
+                                 SCPNomination const& st);
+
     NominationProtocol(Slot& slot);
 
     SCP::EnvelopeState processEnvelope(SCPEnvelopeWrapperPtr envelope);
@@ -119,6 +120,9 @@ class NominationProtocol
     }
 
     Json::Value getJsonInfo();
+
+    SCP::QuorumInfoNodeState getState(NodeID const& node,
+                                      bool selfAlreadyMovedOn);
 
     SCPEnvelope const*
     getLastMessageSend() const

@@ -5,8 +5,10 @@
 #include "util/Fs.h"
 #include "crypto/Hex.h"
 #include "util/FileSystemException.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include <Tracy.hpp>
+#include <filesystem>
 #include <fmt/format.h>
 
 #include <map>
@@ -14,11 +16,17 @@
 #include <sstream>
 
 #ifdef _WIN32
-#include <direct.h>
+#include <Windows.h>
+#include <fcntl.h>
+#include <io.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys\stat.h>
+#include <sys\types.h>
 
-// Latest version of VC++ complains without this define (confused by C++ 17)
-#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING 1
-#include <experimental/filesystem>
+#include <direct.h>
 
 #include <io.h>
 #else
@@ -96,25 +104,17 @@ flushFileChanges(native_handle_t fh)
     }
 }
 
-bool
-shouldUseRandomAccessHandle(std::string const& path)
-{
-    // Named pipes use stream mode, everything else uses random access.
-    return path.find("\\\\.\\pipe\\") != 0;
-}
-
 native_handle_t
 openFileToWrite(std::string const& path)
 {
     ZoneScoped;
-    HANDLE h = ::CreateFile(
-        path.c_str(),
-        GENERIC_READ | GENERIC_WRITE,                   // DesiredAccess
-        FILE_SHARE_READ | FILE_SHARE_WRITE,             // ShareMode
-        NULL,                                           // SecurityAttributes
-        CREATE_ALWAYS,                                  // CreationDisposition
-        (FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED), // FlagsAndAttributes
-        NULL);                                          // TemplateFile
+    HANDLE h = ::CreateFile(path.c_str(),
+                            GENERIC_READ | GENERIC_WRITE,       // DesiredAccess
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, // ShareMode
+                            NULL,                  // SecurityAttributes
+                            CREATE_ALWAYS,         // CreationDisposition
+                            FILE_ATTRIBUTE_NORMAL, // FlagsAndAttributes
+                            NULL);                 // TemplateFile
 
     if (h == INVALID_HANDLE_VALUE)
     {
@@ -123,6 +123,28 @@ openFileToWrite(std::string const& path)
             path + std::string("\"): "));
     }
     return h;
+}
+
+FILE*
+fdOpen(native_handle_t h)
+{
+    FILE* res;
+    int const fd =
+        ::_open_osfhandle(reinterpret_cast<::intptr_t>(h), _O_APPEND);
+    if (-1 != fd)
+    {
+        res = ::_fdopen(fd, "wb");
+        if (res == NULL)
+        {
+            ::_close(fd);
+        }
+    }
+    else
+    {
+        ::CloseHandle(h);
+        res = NULL;
+    }
+    return res;
 }
 
 bool
@@ -138,77 +160,11 @@ durableRename(std::string const& src, std::string const& dst,
     return true;
 }
 
-bool
-exists(std::string const& name)
-{
-    ZoneScoped;
-    if (name.empty())
-        return false;
-
-    if (GetFileAttributes(name.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        if (GetLastError() == ERROR_FILE_NOT_FOUND ||
-            GetLastError() == ERROR_PATH_NOT_FOUND)
-        {
-            return false;
-        }
-        else
-        {
-            std::string msg("error accessing path: ");
-            throw FileSystemException(msg + name);
-        }
-    }
-    return true;
-}
-
-bool
-mkdir(std::string const& name)
-{
-    ZoneScoped;
-    bool b = _mkdir(name.c_str()) == 0;
-    CLOG_DEBUG(Fs, "{}{}", (b ? "created dir " : "failed to create dir "),
-               name);
-    return b;
-}
-
-void
-deltree(std::string const& d)
-{
-    ZoneScoped;
-    namespace fs = std::experimental::filesystem;
-    fs::remove_all(fs::path(d));
-}
-
-std::vector<std::string>
-findfiles(std::string const& p,
-          std::function<bool(std::string const& name)> predicate)
-{
-    ZoneScoped;
-    using namespace std;
-    namespace fs = std::experimental::filesystem;
-
-    std::vector<std::string> res;
-    for (auto& entry : fs::directory_iterator(fs::path(p)))
-    {
-        if (fs::is_regular_file(entry.status()))
-        {
-            auto n = entry.path().filename().string();
-            if (predicate(n))
-            {
-                res.emplace_back(n);
-            }
-        }
-    }
-    return res;
-}
-
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <ftw.h>
 #include <sys/file.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 static std::map<std::string, int> lockMap;
@@ -277,12 +233,6 @@ flushFileChanges(native_handle_t fd)
     }
 }
 
-bool
-shouldUseRandomAccessHandle(std::string const& path)
-{
-    return false;
-}
-
 native_handle_t
 openFileToWrite(std::string const& path)
 {
@@ -340,158 +290,67 @@ durableRename(std::string const& src, std::string const& dst,
     }
     return true;
 }
+#endif
+
+namespace stdfs = std::filesystem;
 
 bool
 exists(std::string const& name)
 {
     ZoneScoped;
-    struct stat buf;
-    if (stat(name.c_str(), &buf) == -1)
-    {
-        if (errno == ENOENT)
-        {
-            return false;
-        }
-        else
-        {
-            std::string msg("error accessing path: ");
-            throw FileSystemException(msg + name);
-        }
-    }
-    return true;
+    return stdfs::exists(stdfs::path(name));
 }
 
 bool
 mkdir(std::string const& name)
 {
     ZoneScoped;
-    bool b = ::mkdir(name.c_str(), 0700) == 0;
-    CLOG_DEBUG(Fs, "{}{}", (b ? "created dir " : "failed to create dir "),
+    bool ok = stdfs::create_directory(stdfs::path(name));
+    CLOG_DEBUG(Fs, "{}{}", (ok ? "created dir " : "failed to create dir "),
                name);
-    return b;
-}
-
-namespace
-{
-
-int
-nftw_deltree_callback(char const* name, struct stat const* st, int flag,
-                      struct FTW* ftw)
-{
-    ZoneScoped;
-    CLOG_DEBUG(Fs, "deleting: {}", name);
-    if (flag == FTW_DP)
-    {
-        if (rmdir(name) != 0)
-        {
-            throw FileSystemException(std::string{"rmdir of "} + name +
-                                      " failed");
-        }
-    }
-    else
-    {
-        if (std::remove(name) != 0)
-        {
-            throw FileSystemException(std::string{"std::remove of "} + name +
-                                      " failed");
-        }
-    }
-    return 0;
-}
+    return ok;
 }
 
 void
 deltree(std::string const& d)
 {
     ZoneScoped;
-    if (nftw(d.c_str(), nftw_deltree_callback, FOPEN_MAX, FTW_DEPTH) != 0)
-    {
-        throw FileSystemException("nftw failed in deltree for " + d);
-    }
+    stdfs::remove_all(stdfs::path(d));
 }
 
 std::vector<std::string>
-findfiles(std::string const& path,
+findfiles(std::string const& p,
           std::function<bool(std::string const& name)> predicate)
 {
     ZoneScoped;
-    auto dir = opendir(path.c_str());
-    auto result = std::vector<std::string>{};
-    if (!dir)
+    std::vector<std::string> res;
+    for (auto& entry : stdfs::directory_iterator(stdfs::path(p)))
     {
-        return result;
-    }
-
-    try
-    {
-        while (auto entry = readdir(dir))
+        if (stdfs::is_regular_file(entry.status()))
         {
-            auto name = std::string{entry->d_name};
-            if (predicate(name))
+            auto n = entry.path().filename().string();
+            if (predicate(n))
             {
-                result.push_back(name);
+                res.emplace_back(n);
             }
         }
-
-        closedir(dir);
-        return result;
     }
-    catch (...)
-    {
-        // small RAII class could do here
-        closedir(dir);
-        throw;
-    }
-}
-
-#endif
-
-PathSplitter::PathSplitter(std::string path) : mPath{std::move(path)}, mPos{0}
-{
-}
-
-std::string
-PathSplitter::next()
-{
-    auto slash = mPath.find('/', mPos);
-    mPos = slash == std::string::npos ? mPath.length() : slash;
-    auto r = mPos == 0 ? "/" : mPath.substr(0, mPos);
-    mPos++;
-    auto mLastSlash = mPos;
-    while (mLastSlash < mPath.length() && mPath[mLastSlash] == '/')
-        mLastSlash++;
-    if (mLastSlash > mPos)
-        mPath.erase(mPos, mLastSlash - mPos);
-    return r;
-}
-
-bool
-PathSplitter::hasNext() const
-{
-    return mPos < mPath.length();
+    return res;
 }
 
 bool
 mkpath(const std::string& path)
 {
     ZoneScoped;
-    auto splitter = PathSplitter{path};
-    while (splitter.hasNext())
-    {
-        auto subpath = splitter.next();
-        if (!exists(subpath) && !mkdir(subpath))
-        {
-            return false;
-        }
-    }
-
-    return true;
+    auto p = stdfs::path(path);
+    stdfs::create_directories(p);
+    return stdfs::exists(p) && stdfs::is_directory(p);
 }
 
 std::string
 hexStr(uint32_t checkpointNum)
 {
-    return fmt::format("{:08x}", checkpointNum);
+    return fmt::format(FMT_STRING("{:08x}"), checkpointNum);
 }
 
 std::string
@@ -501,7 +360,7 @@ hexDir(std::string const& hexStr)
         "([[:xdigit:]]{2})([[:xdigit:]]{2})([[:xdigit:]]{2}).*");
     std::smatch sm;
     bool matched = std::regex_match(hexStr, sm, rx);
-    assert(matched);
+    releaseAssert(matched);
     return (std::string(sm[1]) + "/" + std::string(sm[2]) + "/" +
             std::string(sm[3]));
 }
@@ -530,8 +389,7 @@ void
 checkGzipSuffix(std::string const& filename)
 {
     static const std::string suf(".gz");
-    if (!(filename.size() >= suf.size() &&
-          equal(suf.rbegin(), suf.rend(), filename.rbegin())))
+    if (std::filesystem::path(filename).extension().string() != suf)
     {
         throw std::runtime_error("filename does not end in .gz");
     }
@@ -541,8 +399,7 @@ void
 checkNoGzipSuffix(std::string const& filename)
 {
     static const std::string suf(".gz");
-    if (filename.size() >= suf.size() &&
-        equal(suf.rbegin(), suf.rend(), filename.rbegin()))
+    if (std::filesystem::path(filename).extension().string() == suf)
     {
         throw std::runtime_error("filename ends in .gz");
     }
@@ -552,7 +409,7 @@ size_t
 size(std::ifstream& ifs)
 {
     ZoneScoped;
-    assert(ifs.is_open());
+    releaseAssert(ifs.is_open());
 
     ifs.seekg(0, ifs.end);
     auto result = ifs.tellg();
@@ -565,17 +422,7 @@ size_t
 size(std::string const& filename)
 {
     ZoneScoped;
-    std::ifstream ifs;
-    ifs.open(filename, std::ifstream::binary);
-    if (ifs)
-    {
-        ifs.exceptions(std::ios::badbit);
-        return size(ifs);
-    }
-    else
-    {
-        return 0;
-    }
+    return stdfs::file_size(stdfs::path(filename));
 }
 
 #ifdef _WIN32

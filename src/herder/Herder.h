@@ -65,10 +65,16 @@ class Herder
     // this is to help recover potential missing SCP messages for other nodes
     static uint32 const SCP_EXTRA_LOOKBACK_LEDGERS;
 
+    static std::chrono::minutes const TX_SET_GC_DELAY;
+
     enum State
     {
+        // Starting up, no state is known
+        HERDER_BOOTING_STATE,
+        // Fell out of sync, resyncing
         HERDER_SYNCING_STATE,
-        HERDER_TRACKING_STATE,
+        // Fully in sync with the network
+        HERDER_TRACKING_NETWORK_STATE,
         HERDER_NUM_STATE
     };
 
@@ -90,7 +96,7 @@ class Herder
     };
 
     virtual State getState() const = 0;
-    virtual std::string getStateHuman() const = 0;
+    virtual std::string getStateHuman(State st) const = 0;
 
     // Ensure any metrics that are "current state" gauge-like counters reflect
     // the current reality as best as possible.
@@ -100,36 +106,53 @@ class Herder
     virtual void shutdown() = 0;
 
     // restores Herder's state from disk
-    virtual void restoreState() = 0;
+    virtual void start() = 0;
+
+    virtual void lastClosedLedgerIncreased() = 0;
+
+    // Setup Herder's state to fully participate in consensus
+    virtual void setTrackingSCPState(uint64_t index, StellarValue const& value,
+                                     bool isTrackingNetwork) = 0;
 
     virtual bool recvSCPQuorumSet(Hash const& hash,
                                   SCPQuorumSet const& qset) = 0;
-    virtual bool recvTxSet(Hash const& hash, TxSetFrame const& txset) = 0;
+    virtual bool recvTxSet(Hash const& hash, TxSetFrameConstPtr txset) = 0;
     // We are learning about a new transaction.
     virtual TransactionQueue::AddResult
-    recvTransaction(TransactionFrameBasePtr tx) = 0;
+    recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf) = 0;
     virtual void peerDoesntHave(stellar::MessageType type,
                                 uint256 const& itemID, Peer::pointer peer) = 0;
-    virtual TxSetFramePtr getTxSet(Hash const& hash) = 0;
+    virtual TxSetFrameConstPtr getTxSet(Hash const& hash) = 0;
     virtual SCPQuorumSetPtr getQSet(Hash const& qSetHash) = 0;
 
     // We are learning about a new envelope.
     virtual EnvelopeStatus recvSCPEnvelope(SCPEnvelope const& envelope) = 0;
 
+#ifdef BUILD_TESTS
     // We are learning about a new fully-fetched envelope.
     virtual EnvelopeStatus recvSCPEnvelope(SCPEnvelope const& envelope,
                                            const SCPQuorumSet& qset,
-                                           TxSetFrame txset) = 0;
+                                           TxSetFrameConstPtr txset) = 0;
 
+    virtual void
+    externalizeValue(TxSetFrameConstPtr txSet, uint32_t ledgerSeq,
+                     uint64_t closeTime,
+                     xdr::xvector<UpgradeType, 6> const& upgrades,
+                     std::optional<SecretKey> skToSignValue = std::nullopt) = 0;
+
+    virtual VirtualTimer const& getTriggerTimer() const = 0;
+#endif
     // a peer needs our SCP state
     virtual void sendSCPStateToPeer(uint32 ledgerSeq, Peer::pointer peer) = 0;
 
-    // returns the latest known ledger seq using consensus information
-    // and local state
-    virtual uint32_t getCurrentLedgerSeq() const = 0;
+    virtual uint32_t trackingConsensusLedgerIndex() const = 0;
 
     // return the smallest ledger number we need messages for when asking peers
     virtual uint32 getMinLedgerSeqToAskPeers() const = 0;
+    virtual uint32 getMinLedgerSeqToRemember() const = 0;
+
+    virtual bool isNewerNominationOrBallotSt(SCPStatement const& oldSt,
+                                             SCPStatement const& newSt) = 0;
 
     // Return the maximum sequence number for any tx (or 0 if none) from a given
     // sender in the pending or recent tx sets.
@@ -167,5 +190,9 @@ class Herder
                                                     bool fullKeys) = 0;
     virtual QuorumTracker::QuorumMap const&
     getCurrentlyTrackedQuorum() const = 0;
+
+    virtual size_t getMaxQueueSizeOps() const = 0;
+    virtual bool isBannedTx(Hash const& hash) const = 0;
+    virtual TransactionFrameBaseConstPtr getTx(Hash const& hash) const = 0;
 };
 }

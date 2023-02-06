@@ -42,8 +42,8 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     void removeOneTimeSignerKeyFromFeeSource(AbstractLedgerTxn& ltx) const;
 
   protected:
-    void resetResults(LedgerHeader const& header, int64_t baseFee,
-                      bool applying);
+    void resetResults(LedgerHeader const& header,
+                      std::optional<int64_t> baseFee, bool applying);
 
   public:
     FeeBumpTransactionFrame(Hash const& networkID,
@@ -66,8 +66,7 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     TransactionEnvelope const& getEnvelope() const override;
 
     int64_t getFeeBid() const override;
-    int64_t getMinFee(LedgerHeader const& header) const override;
-    int64_t getFee(LedgerHeader const& header, int64_t baseFee,
+    int64_t getFee(LedgerHeader const& header, std::optional<int64_t> baseFee,
                    bool applying) const override;
 
     Hash const& getContentsHash() const override;
@@ -75,6 +74,7 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     Hash const& getInnerFullHash() const;
 
     uint32_t getNumOperations() const override;
+    std::vector<Operation> const& getRawOperations() const override;
 
     TransactionResult& getResult() override;
     TransactionResultCode getResultCode() const override;
@@ -82,12 +82,16 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     SequenceNumber getSeqNum() const override;
     AccountID getFeeSourceID() const override;
     AccountID getSourceID() const override;
+    std::optional<SequenceNumber const> const getMinSeqNum() const override;
+    Duration getMinSeqAge() const override;
+    uint32 getMinSeqLedgerGap() const override;
 
     void
     insertKeysForFeeProcessing(UnorderedSet<LedgerKey>& keys) const override;
     void insertKeysForTxApply(UnorderedSet<LedgerKey>& keys) const override;
 
-    void processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee) override;
+    void processFeeSeqNum(AbstractLedgerTxn& ltx,
+                          std::optional<int64_t> baseFee) override;
 
     StellarMessage toStellarMessage() const override;
 

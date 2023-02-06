@@ -1,3 +1,9 @@
+#pragma once
+
+// Copyright 2021 Stellar Development Foundation and contributors. Licensed
+// under the Apache License, Version 2.0. See the COPYING file at the root
+// of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
+
 #include "ledger/InternalLedgerEntry.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnImpl.h"
@@ -31,9 +37,10 @@ class InMemoryLedgerTxnRoot : public AbstractLedgerTxnParent
         bool bestOfferDebuggingEnabled
 #endif
     );
-    void addChild(AbstractLedgerTxn& child) override;
-    void commitChild(EntryIterator iter, LedgerTxnConsistency cons) override;
-    void rollbackChild() override;
+    void addChild(AbstractLedgerTxn& child, TransactionMode mode) override;
+    void commitChild(EntryIterator iter,
+                     LedgerTxnConsistency cons) noexcept override;
+    void rollbackChild() noexcept override;
 
     UnorderedMap<LedgerKey, LedgerEntry> getAllOffers() override;
     std::shared_ptr<LedgerEntry const>
@@ -44,6 +51,10 @@ class InMemoryLedgerTxnRoot : public AbstractLedgerTxnParent
     UnorderedMap<LedgerKey, LedgerEntry>
     getOffersByAccountAndAsset(AccountID const& account,
                                Asset const& asset) override;
+
+    UnorderedMap<LedgerKey, LedgerEntry>
+    getPoolShareTrustLinesByAccountAndAsset(AccountID const& account,
+                                            Asset const& asset) override;
 
     LedgerHeader const& getHeader() const override;
 
@@ -64,8 +75,15 @@ class InMemoryLedgerTxnRoot : public AbstractLedgerTxnParent
     void dropOffers() override;
     void dropTrustLines() override;
     void dropClaimableBalances() override;
+    void dropLiquidityPools() override;
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    void dropContractData() override;
+    void dropConfigSettings() override;
+#endif
     double getPrefetchHitRate() const override;
     uint32_t prefetch(UnorderedSet<LedgerKey> const& keys) override;
+    void prepareNewObjects(size_t s) override;
+
 #ifdef BUILD_TESTS
     void resetForFuzzer() override;
 #endif // BUILD_TESTS

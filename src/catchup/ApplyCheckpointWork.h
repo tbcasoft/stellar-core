@@ -14,11 +14,6 @@
 #include "xdr/Stellar-SCP.h"
 #include "xdr/Stellar-ledger.h"
 
-namespace medida
-{
-class Meter;
-}
-
 namespace stellar
 {
 
@@ -39,7 +34,7 @@ struct LedgerHeaderHistoryEntry;
  * another check is made - if new local ledger matches corresponding ledger from
  * file.
  *
- * Contructor of this class takes some important parameters:
+ * Constructor of this class takes some important parameters:
  * * downloadDir - directory containing ledger and transaction files
  * * range - LedgerRange to apply, must be checkpoint-aligned,
  * and cover at most one checkpoint.
@@ -57,17 +52,16 @@ class ApplyCheckpointWork : public BasicWork
     LedgerHeaderHistoryEntry mHeaderHistoryEntry;
     OnFailureCallback mOnFailure;
 
-    medida::Meter& mApplyLedgerSuccess;
-    medida::Meter& mApplyLedgerFailure;
-
     bool mFilesOpen{false};
 
     std::shared_ptr<ConditionalWork> mConditionalWork;
 
-    TxSetFramePtr getCurrentTxSet();
+    TxSetFrameConstPtr getCurrentTxSet();
     void openInputFiles();
 
     std::shared_ptr<LedgerCloseData> getNextLedgerCloseData();
+
+    void closeFiles();
 
   public:
     ApplyCheckpointWork(Application& app, TmpDir const& downloadDir,

@@ -10,6 +10,7 @@
 #include "main/Application.h"
 #include "overlay/StellarXDR.h"
 #include "transactions/TransactionUtils.h"
+#include "util/ProtocolVersion.h"
 
 const uint32_t INFLATION_FREQUENCY = (60 * 60 * 24 * 7); // every 7 days
 // inflation is .000190721 per 7 days, or 1% a year
@@ -52,13 +53,13 @@ InflationOpFrame::doApply(AbstractLedgerTxn& ltx)
     */
 
     int64_t totalVotes = lh.totalCoins;
-    int64_t minBalance =
-        bigDivide(totalVotes, INFLATION_WIN_MIN_PERCENT, TRILLION, ROUND_DOWN);
+    int64_t minBalance = bigDivideOrThrow(totalVotes, INFLATION_WIN_MIN_PERCENT,
+                                          TRILLION, ROUND_DOWN);
 
     auto winners = ltx.queryInflationWinners(INFLATION_NUM_WINNERS, minBalance);
 
-    auto inflationAmount = bigDivide(lh.totalCoins, INFLATION_RATE_TRILLIONTHS,
-                                     TRILLION, ROUND_DOWN);
+    auto inflationAmount = bigDivideOrThrow(
+        lh.totalCoins, INFLATION_RATE_TRILLIONTHS, TRILLION, ROUND_DOWN);
     auto amountToDole = inflationAmount + lh.feePool;
 
     lh.feePool = 0;
@@ -73,11 +74,11 @@ InflationOpFrame::doApply(AbstractLedgerTxn& ltx)
     for (auto const& w : winners)
     {
         int64_t toDoleThisWinner =
-            bigDivide(amountToDole, w.votes, totalVotes, ROUND_DOWN);
+            bigDivideOrThrow(amountToDole, w.votes, totalVotes, ROUND_DOWN);
         if (toDoleThisWinner == 0)
             continue;
 
-        if (lh.ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(lh.ledgerVersion, ProtocolVersion::V_10))
         {
             auto winner = stellar::loadAccountWithoutRecord(ltx, w.accountID);
             if (winner)
@@ -93,7 +94,7 @@ InflationOpFrame::doApply(AbstractLedgerTxn& ltx)
         if (winner)
         {
             leftAfterDole -= toDoleThisWinner;
-            if (lh.ledgerVersion <= 7)
+            if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_8))
             {
                 lh.totalCoins += toDoleThisWinner;
             }
@@ -108,7 +109,7 @@ InflationOpFrame::doApply(AbstractLedgerTxn& ltx)
 
     // put back in fee pool as unclaimed funds
     lh.feePool += leftAfterDole;
-    if (lh.ledgerVersion > 7)
+    if (protocolVersionStartsFrom(lh.ledgerVersion, ProtocolVersion::V_8))
     {
         lh.totalCoins += inflationAmount;
     }
@@ -123,9 +124,9 @@ InflationOpFrame::doCheckValid(uint32_t ledgerVersion)
 }
 
 bool
-InflationOpFrame::isVersionSupported(uint32_t protocolVersion) const
+InflationOpFrame::isOpSupported(LedgerHeader const& header) const
 {
-    return protocolVersion < 12;
+    return protocolVersionIsBefore(header.ledgerVersion, ProtocolVersion::V_12);
 }
 
 ThresholdLevel

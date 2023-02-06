@@ -11,6 +11,7 @@
 #include "overlay/OverlayManager.h"
 #include "test/TestAccount.h"
 #include "test/TxTests.h"
+#include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
 #include "util/Math.h"
@@ -61,6 +62,28 @@ LoadGenerator::LoadGenerator(Application& app)
     createRootAccount();
 }
 
+LoadGenMode
+LoadGenerator::getMode(std::string const& mode)
+{
+    if (mode == "create")
+    {
+        return LoadGenMode::CREATE;
+    }
+    else if (mode == "pay")
+    {
+        return LoadGenMode::PAY;
+    }
+    else if (mode == "pretend")
+    {
+        return LoadGenMode::PRETEND;
+    }
+    else
+    {
+        // unknown mode
+        abort();
+    }
+}
+
 void
 LoadGenerator::createRootAccount()
 {
@@ -72,6 +95,22 @@ LoadGenerator::createRootAccount()
         {
             CLOG_ERROR(LoadGen, "Could not retrieve root account!");
         }
+    }
+}
+
+unsigned short
+LoadGenerator::chooseOpCount(Config const& cfg) const
+{
+    if (cfg.LOADGEN_OP_COUNT_FOR_TESTING.empty())
+    {
+        return 1;
+    }
+    else
+    {
+        std::discrete_distribution<uint32> distribution(
+            cfg.LOADGEN_OP_COUNT_DISTRIBUTION_FOR_TESTING.begin(),
+            cfg.LOADGEN_OP_COUNT_DISTRIBUTION_FOR_TESTING.end());
+        return cfg.LOADGEN_OP_COUNT_FOR_TESTING[distribution(gRandomEngine)];
     }
 }
 
@@ -91,14 +130,15 @@ LoadGenerator::getTxPerStep(uint32_t txRate, std::chrono::seconds spikeInterval,
     auto now = mApp.getClock().now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - *mStartTime);
-    auto txs = bigDivide(elapsed.count(), txRate, 1000, Rounding::ROUND_DOWN);
+    auto txs =
+        bigDivideOrThrow(elapsed.count(), txRate, 1000, Rounding::ROUND_DOWN);
     if (spikeInterval.count() > 0)
     {
-        txs +=
-            bigDivide(std::chrono::duration_cast<std::chrono::seconds>(elapsed)
-                          .count(),
-                      1, spikeInterval.count(), Rounding::ROUND_DOWN) *
-            spikeSize;
+        txs += bigDivideOrThrow(
+                   std::chrono::duration_cast<std::chrono::seconds>(elapsed)
+                       .count(),
+                   1, spikeInterval.count(), Rounding::ROUND_DOWN) *
+               spikeSize;
     }
 
     if (txs <= mTotalSubmitted)
@@ -120,9 +160,9 @@ LoadGenerator::reset()
     mFailed = false;
 }
 
-// Schedule a callback to generateLoad() STEP_MSECS miliseconds from now.
+// Schedule a callback to generateLoad() STEP_MSECS milliseconds from now.
 void
-LoadGenerator::scheduleLoadGeneration(bool isCreate, uint32_t nAccounts,
+LoadGenerator::scheduleLoadGeneration(LoadGenMode mode, uint32_t nAccounts,
                                       uint32_t offset, uint32_t nTxs,
                                       uint32_t txRate, uint32_t batchSize,
                                       std::chrono::seconds spikeInterval,
@@ -149,9 +189,9 @@ LoadGenerator::scheduleLoadGeneration(bool isCreate, uint32_t nAccounts,
     {
         mLoadTimer->expires_from_now(std::chrono::milliseconds(STEP_MSECS));
         mLoadTimer->async_wait(
-            [this, nAccounts, offset, nTxs, txRate, batchSize, isCreate,
+            [this, nAccounts, offset, nTxs, txRate, batchSize, mode,
              spikeInterval, spikeSize]() {
-                this->generateLoad(isCreate, nAccounts, offset, nTxs, txRate,
+                this->generateLoad(mode, nAccounts, offset, nTxs, txRate,
                                    batchSize, spikeInterval, spikeSize);
             },
             &VirtualTimer::onFailureNoop);
@@ -164,9 +204,9 @@ LoadGenerator::scheduleLoadGeneration(bool isCreate, uint32_t nAccounts,
             mApp.getState());
         mLoadTimer->expires_from_now(std::chrono::seconds(10));
         mLoadTimer->async_wait(
-            [this, nAccounts, offset, nTxs, txRate, batchSize, isCreate,
+            [this, nAccounts, offset, nTxs, txRate, batchSize, mode,
              spikeInterval, spikeSize]() {
-                this->scheduleLoadGeneration(isCreate, nAccounts, offset, nTxs,
+                this->scheduleLoadGeneration(mode, nAccounts, offset, nTxs,
                                              txRate, batchSize, spikeInterval,
                                              spikeSize);
             },
@@ -179,12 +219,14 @@ LoadGenerator::scheduleLoadGeneration(bool isCreate, uint32_t nAccounts,
 // If work remains after the current step, call scheduleLoadGeneration()
 // with the remainder.
 void
-LoadGenerator::generateLoad(bool isCreate, uint32_t nAccounts, uint32_t offset,
-                            uint32_t nTxs, uint32_t txRate, uint32_t batchSize,
+LoadGenerator::generateLoad(LoadGenMode mode, uint32_t nAccounts,
+                            uint32_t offset, uint32_t nTxs, uint32_t txRate,
+                            uint32_t batchSize,
                             std::chrono::seconds spikeInterval,
                             uint32_t spikeSize)
 
 {
+    bool isCreate = mode == LoadGenMode::CREATE;
     if (!mStartTime)
     {
         mStartTime =
@@ -220,15 +262,21 @@ LoadGenerator::generateLoad(bool isCreate, uint32_t nAccounts, uint32_t offset,
 
     for (int64_t i = 0; i < txPerStep; ++i)
     {
-        if (isCreate)
+        switch (mode)
         {
+        case LoadGenMode::CREATE:
             nAccounts =
                 submitCreationTx(nAccounts, offset, batchSize, ledgerNum);
-        }
-        else
-        {
-            nTxs =
-                submitPaymentTx(nAccounts, offset, batchSize, ledgerNum, nTxs);
+            break;
+        case LoadGenMode::PAY:
+            nTxs = submitPaymentOrPretendTx(nAccounts, offset, batchSize,
+                                            ledgerNum, nTxs, 1, mode);
+            break;
+        case LoadGenMode::PRETEND:
+            auto opCount = chooseOpCount(mApp.getConfig());
+            nTxs = submitPaymentOrPretendTx(nAccounts, offset, batchSize,
+                                            ledgerNum, nTxs, opCount, mode);
+            break;
         }
 
         if (nAccounts == 0 || (!isCreate && nTxs == 0))
@@ -245,12 +293,12 @@ LoadGenerator::generateLoad(bool isCreate, uint32_t nAccounts, uint32_t offset,
     // Emit a log message once per second.
     if (now != mLastSecond)
     {
-        logProgress(submit, isCreate, nAccounts, nTxs, batchSize, txRate);
+        logProgress(submit, mode, nAccounts, nTxs, batchSize, txRate);
     }
 
     mLastSecond = now;
     mTotalSubmitted += txPerStep;
-    scheduleLoadGeneration(isCreate, nAccounts, offset, nTxs, txRate, batchSize,
+    scheduleLoadGeneration(mode, nAccounts, offset, nTxs, txRate, batchSize,
                            spikeInterval, spikeSize);
 }
 
@@ -259,14 +307,16 @@ LoadGenerator::submitCreationTx(uint32_t nAccounts, uint32_t offset,
                                 uint32_t batchSize, uint32_t ledgerNum)
 {
     uint32_t numToProcess = nAccounts < batchSize ? nAccounts : batchSize;
-    TxInfo tx =
+    TestAccountPtr from;
+    TransactionFramePtr tx;
+    std::tie(from, tx) =
         creationTransaction(mAccounts.size() + offset, numToProcess, ledgerNum);
     TransactionResultCode code;
     TransactionQueue::AddResult status;
     bool createDuplicate = false;
-    int numTries = 0;
+    uint32_t numTries = 0;
 
-    while ((status = tx.execute(mApp, true, code, batchSize)) !=
+    while ((status = execute(tx, LoadGenMode::CREATE, code, batchSize)) !=
            TransactionQueue::AddResult::ADD_STATUS_PENDING)
     {
         // Ignore duplicate transactions, simply continue generating load
@@ -285,7 +335,7 @@ LoadGenerator::submitCreationTx(uint32_t nAccounts, uint32_t offset,
         }
 
         // In case of bad seqnum, attempt refreshing it from the DB
-        maybeHandleFailedTx(tx.mFrom, status, code);
+        maybeHandleFailedTx(from, status, code);
     }
 
     if (!createDuplicate)
@@ -297,19 +347,26 @@ LoadGenerator::submitCreationTx(uint32_t nAccounts, uint32_t offset,
 }
 
 uint32_t
-LoadGenerator::submitPaymentTx(uint32_t nAccounts, uint32_t offset,
-                               uint32_t batchSize, uint32_t ledgerNum,
-                               uint32_t nTxs)
+LoadGenerator::submitPaymentOrPretendTx(uint32_t nAccounts, uint32_t offset,
+                                        uint32_t batchSize, uint32_t ledgerNum,
+                                        uint32_t nTxs, uint32_t opCount,
+                                        LoadGenMode mode)
 {
     auto sourceAccountId = rand_uniform<uint64_t>(0, nAccounts - 1) + offset;
-    TxInfo tx =
-        paymentTransaction(nAccounts, offset, ledgerNum, sourceAccountId);
+    TransactionFramePtr tx;
+    TestAccountPtr from;
+    bool usePaymentOp = mode == LoadGenMode::PAY;
+    std::tie(from, tx) =
+        usePaymentOp
+            ? paymentTransaction(nAccounts, offset, ledgerNum, sourceAccountId)
+            : pretendTransaction(nAccounts, offset, ledgerNum, sourceAccountId,
+                                 opCount);
 
     TransactionResultCode code;
     TransactionQueue::AddResult status;
-    int numTries = 0;
+    uint32_t numTries = 0;
 
-    while ((status = tx.execute(mApp, false, code, batchSize)) !=
+    while ((status = execute(tx, mode, code, batchSize)) !=
            TransactionQueue::AddResult::ADD_STATUS_PENDING)
     {
         if (++numTries >= TX_SUBMIT_MAX_TRIES ||
@@ -320,10 +377,14 @@ LoadGenerator::submitPaymentTx(uint32_t nAccounts, uint32_t offset,
         }
 
         // In case of bad seqnum, attempt refreshing it from the DB
-        maybeHandleFailedTx(tx.mFrom, status, code); // Update seq num
+        maybeHandleFailedTx(from, status, code); // Update seq num
 
         // Regenerate a new payment tx
-        tx = paymentTransaction(nAccounts, offset, ledgerNum, sourceAccountId);
+        std::tie(from, tx) =
+            usePaymentOp ? paymentTransaction(nAccounts, offset, ledgerNum,
+                                              sourceAccountId)
+                         : pretendTransaction(nAccounts, offset, ledgerNum,
+                                              sourceAccountId, opCount);
     }
 
     nTxs -= 1;
@@ -331,8 +392,8 @@ LoadGenerator::submitPaymentTx(uint32_t nAccounts, uint32_t offset,
 }
 
 void
-LoadGenerator::logProgress(std::chrono::nanoseconds submitTimer, bool isCreate,
-                           uint32_t nAccounts, uint32_t nTxs,
+LoadGenerator::logProgress(std::chrono::nanoseconds submitTimer,
+                           LoadGenMode mode, uint32_t nAccounts, uint32_t nTxs,
                            uint32_t batchSize, uint32_t txRate)
 {
     using namespace std::chrono;
@@ -343,9 +404,10 @@ LoadGenerator::logProgress(std::chrono::nanoseconds submitTimer, bool isCreate,
 
     auto submitSteps = duration_cast<milliseconds>(submitTimer).count();
 
-    auto remainingTxCount = isCreate ? nAccounts / batchSize : nTxs;
-    auto etaSecs =
-        (uint32_t)(((double)remainingTxCount) / applyTx.one_minute_rate());
+    auto remainingTxCount =
+        (mode == LoadGenMode::CREATE) ? nAccounts / batchSize : nTxs;
+    auto etaSecs = (uint32_t)(((double)remainingTxCount) /
+                              max<double>(1, applyTx.one_minute_rate()));
 
     auto etaHours = etaSecs / 3600;
     auto etaMins = etaSecs % 60;
@@ -362,14 +424,14 @@ LoadGenerator::logProgress(std::chrono::nanoseconds submitTimer, bool isCreate,
     txm.report();
 }
 
-LoadGenerator::TxInfo
+std::pair<LoadGenerator::TestAccountPtr, TransactionFramePtr>
 LoadGenerator::creationTransaction(uint64_t startAccount, uint64_t numItems,
                                    uint32_t ledgerNum)
 {
     vector<Operation> creationOps =
         createAccounts(startAccount, numItems, ledgerNum);
-    TxInfo newTx = TxInfo{mRoot, creationOps};
-    return newTx;
+    return std::make_pair(mRoot, createTransactionFramePtr(
+                                     mRoot, creationOps, LoadGenMode::CREATE));
 }
 
 void
@@ -431,11 +493,7 @@ LoadGenerator::pickAccountPair(uint32_t numAccounts, uint32_t offset,
 {
     auto sourceAccount = findAccount(sourceAccountId, ledgerNum);
 
-    // Mod with total number of accounts to ensure account exists
-    uint64_t destAccountId =
-        (sourceAccountId + sourceAccount->getLastSequenceNumber()) %
-            numAccounts +
-        offset;
+    auto destAccountId = rand_uniform<uint64_t>(0, numAccounts - 1) + offset;
 
     auto destAccount = findAccount(destAccountId, ledgerNum);
 
@@ -475,7 +533,7 @@ LoadGenerator::findAccount(uint64_t accountId, uint32_t ledgerNum)
     return newAccountPtr;
 }
 
-LoadGenerator::TxInfo
+std::pair<LoadGenerator::TestAccountPtr, TransactionFramePtr>
 LoadGenerator::paymentTransaction(uint32_t numAccounts, uint32_t offset,
                                   uint32_t ledgerNum, uint64_t sourceAccount)
 {
@@ -485,9 +543,37 @@ LoadGenerator::paymentTransaction(uint32_t numAccounts, uint32_t offset,
         pickAccountPair(numAccounts, offset, ledgerNum, sourceAccount);
     vector<Operation> paymentOps = {
         txtest::payment(to->getPublicKey(), amount)};
-    TxInfo tx = TxInfo{from, paymentOps};
+    return std::make_pair(
+        from, createTransactionFramePtr(from, paymentOps, LoadGenMode::PAY));
+}
 
-    return tx;
+std::pair<LoadGenerator::TestAccountPtr, TransactionFramePtr>
+LoadGenerator::pretendTransaction(uint32_t numAccounts, uint32_t offset,
+                                  uint32_t ledgerNum, uint64_t sourceAccount,
+                                  uint32_t opCount)
+{
+    vector<Operation> ops;
+    ops.reserve(opCount);
+    auto acc = findAccount(sourceAccount, ledgerNum);
+    for (uint32 i = 0; i < opCount; i++)
+    {
+        auto args = SetOptionsArguments{};
+
+        // We make SetOptionsOps such that we end up
+        // with a n-op transaction that is exactly 100n + 240 bytes.
+        args.inflationDest = std::make_optional<AccountID>(acc->getPublicKey());
+        args.homeDomain = std::make_optional<std::string>(std::string(16, '*'));
+        if (i == 0)
+        {
+            // The first operation needs to be bigger to achieve
+            // 100n + 240 bytes.
+            args.homeDomain->append(std::string(8, '*'));
+            args.signer = std::make_optional<Signer>(Signer{});
+        }
+        ops.push_back(txtest::setOptions(args));
+    }
+    return std::make_pair(
+        acc, createTransactionFramePtr(acc, ops, LoadGenMode::PRETEND));
 }
 
 void
@@ -587,13 +673,10 @@ LoadGenerator::waitTillComplete(bool isCreate)
     }
 }
 
-//////////////////////////////////////////////////////
-// TxInfo
-//////////////////////////////////////////////////////
-
 LoadGenerator::TxMetrics::TxMetrics(medida::MetricsRegistry& m)
     : mAccountCreated(m.NewMeter({"loadgen", "account", "created"}, "account"))
     , mNativePayment(m.NewMeter({"loadgen", "payment", "native"}, "payment"))
+    , mPretendOps(m.NewMeter({"loadgen", "pretend", "submitted"}, "op"))
     , mTxnAttempted(m.NewMeter({"loadgen", "txn", "attempted"}, "txn"))
     , mTxnRejected(m.NewMeter({"loadgen", "txn", "rejected"}, "txn"))
     , mTxnBytes(m.NewMeter({"loadgen", "txn", "bytes"}, "txn"))
@@ -603,46 +686,66 @@ LoadGenerator::TxMetrics::TxMetrics(medida::MetricsRegistry& m)
 void
 LoadGenerator::TxMetrics::report()
 {
-    CLOG_DEBUG(LoadGen, "Counts: {} tx, {} rj, {} by, {} ac ({} na, ",
+    CLOG_DEBUG(LoadGen, "Counts: {} tx, {} rj, {} by, {} ac ({} na, {} pr, ",
                mTxnAttempted.count(), mTxnRejected.count(), mTxnBytes.count(),
-               mAccountCreated.count(), mNativePayment.count());
+               mAccountCreated.count(), mNativePayment.count(),
+               mPretendOps.count());
 
-    CLOG_DEBUG(LoadGen,
-               "Rates/sec (1m EWMA): {} tx, {} rj, {} by, {} ac, {} na, ",
-               mTxnAttempted.one_minute_rate(), mTxnRejected.one_minute_rate(),
-               mTxnBytes.one_minute_rate(), mAccountCreated.one_minute_rate(),
-               mNativePayment.one_minute_rate());
+    CLOG_DEBUG(
+        LoadGen,
+        "Rates/sec (1m EWMA): {} tx, {} rj, {} by, {} ac, {} na, {} pr, ",
+        mTxnAttempted.one_minute_rate(), mTxnRejected.one_minute_rate(),
+        mTxnBytes.one_minute_rate(), mAccountCreated.one_minute_rate(),
+        mNativePayment.one_minute_rate(), mPretendOps.one_minute_rate());
+}
+
+TransactionFramePtr
+LoadGenerator::createTransactionFramePtr(TestAccountPtr from,
+                                         std::vector<Operation> ops,
+                                         LoadGenMode mode)
+{
+    auto txf = from->tx(ops);
+
+    if (mode == LoadGenMode::PRETEND)
+    {
+        Memo memo(MEMO_TEXT);
+        memo.text() = std::string(28, ' ');
+        txbridge::setMemo(txf, memo);
+
+        txbridge::setMinTime(txf, 0);
+        txbridge::setMaxTime(txf, UINT64_MAX);
+    }
+
+    txbridge::getSignatures(txf).clear();
+    txf->addSignature(from->getSecretKey());
+    return txf;
 }
 
 TransactionQueue::AddResult
-LoadGenerator::TxInfo::execute(Application& app, bool isCreate,
-                               TransactionResultCode& code, int32_t batchSize)
+LoadGenerator::execute(TransactionFramePtr& txf, LoadGenMode mode,
+                       TransactionResultCode& code, int32_t batchSize)
 {
-    auto seqNum = mFrom->getLastSequenceNumber();
-    mFrom->setSequenceNumber(seqNum + 1);
-
-    TransactionFramePtr txf =
-        transactionFromOperations(app, mFrom->getSecretKey(), seqNum + 1, mOps);
-    TxMetrics txm(app.getMetrics());
+    TxMetrics txm(mApp.getMetrics());
 
     // Record tx metrics.
-    if (isCreate)
+    switch (mode)
     {
-        while (batchSize--)
-        {
-            txm.mAccountCreated.Mark();
-        }
+    case LoadGenMode::CREATE:
+        txm.mAccountCreated.Mark(batchSize);
+        break;
+    case LoadGenMode::PAY:
+        txm.mNativePayment.Mark(txf->getNumOperations());
+        break;
+    case LoadGenMode::PRETEND:
+        txm.mPretendOps.Mark(txf->getNumOperations());
     }
-    else
-    {
-        txm.mNativePayment.Mark();
-    }
+
     txm.mTxnAttempted.Mark();
 
     StellarMessage msg(txf->toStellarMessage());
     txm.mTxnBytes.Mark(xdr::xdr_argpack_size(msg));
 
-    auto status = app.getHerder().recvTransaction(txf);
+    auto status = mApp.getHerder().recvTransaction(txf, true);
     if (status != TransactionQueue::AddResult::ADD_STATUS_PENDING)
     {
         CLOG_INFO(LoadGen, "tx rejected '{}': {} ===> {}",
@@ -657,7 +760,8 @@ LoadGenerator::TxInfo::execute(Application& app, bool isCreate,
     }
     else
     {
-        app.getOverlayManager().broadcastMessage(msg);
+        mApp.getOverlayManager().broadcastMessage(msg, false,
+                                                  txf->getFullHash());
     }
 
     return status;

@@ -104,6 +104,17 @@ AS_IF([test "x$enable_asan" = "xyes"], [
   sanitizeopts="address"
 ])
 
+AC_ARG_ENABLE([codecoverage],
+  AS_HELP_STRING([--enable-codecoverage],
+        [build with code coverage enabled]))
+AS_IF([test "x$enable_codecoverage" = "xyes"], [
+  AC_MSG_NOTICE([ enabling codecoverage, see https://clang.llvm.org/docs/SourceBasedCodeCoverage.html ])
+
+  LDFLAGS="$LDFLAGS -fprofile-instr-generate -fcoverage-mapping"
+  CXXFLAGS="$CXXFLAGS -fprofile-instr-generate -fcoverage-mapping"
+  CFLAGS="$CFLAGS -fprofile-instr-generate -fcoverage-mapping"
+])
+
 AC_ARG_ENABLE([memcheck],
   AS_HELP_STRING([--enable-memcheck],
         [build with memcheck (memory-sanitizer) instrumentation]))
@@ -165,6 +176,9 @@ AC_ARG_ENABLE([ccache],
               AS_HELP_STRING([--enable-ccache], [build with ccache]))
 AS_IF([test "x$enable_ccache" = "xyes"], [
   AC_CHECK_PROGS([CCACHE], [ccache])
+  AS_IF([test -z "$CCACHE"], [
+    AC_MSG_ERROR([ccache enabled but not found])
+  ])
   case "$CC" in
   *ccache\ *)
       ;;
@@ -212,8 +226,31 @@ AS_IF([test "x$enable_afl" = "xyes"], [
 ])
 AM_CONDITIONAL([USE_AFL_FUZZ], [test "x$enable_afl" == "xyes"])
 
-# prefer 8 as it's the one we use
-AC_CHECK_PROGS(CLANG_FORMAT, [clang-format-8 clang-format])
+# check to see if we need to append -lstdc++fs or -lc++fs to access
+# functionality from <filesystem> (for some reason this was thought
+# a good idea in gcc 8 and clang 8)
+AC_MSG_CHECKING([to see if <filesystem> works without any extra libs])
+AC_RUN_IFELSE([AC_LANG_PROGRAM([[#include <filesystem>]],
+	      [[return std::filesystem::exists(std::filesystem::path("hello"));]])],
+              [AC_MSG_RESULT([yes]); FS_WORKS=yes],
+              [AC_MSG_RESULT([no]); FS_WORKS=no])
+for testlib in -lstdc++fs -lc++fs; do
+    if test "$FS_WORKS" = "no"; then
+        fs_save_LIBS="$LIBS"
+        LIBS="$testlib $LIBS"
+        AC_MSG_CHECKING([to see if <filesystem> works with $testlib])
+        AC_RUN_IFELSE([AC_LANG_PROGRAM([[#include <filesystem>]],
+		      [[return std::filesystem::exists(std::filesystem::path("hello"));]])],
+                  [AC_MSG_RESULT([yes]); FS_WORKS=yes],
+                  [AC_MSG_RESULT([no]); FS_WORKS=no; LIBS="$fs_save_LIBS"])
+    fi
+done
+if test "$FS_WORKS" = "no"; then
+   AC_MSG_ERROR([C++17 <filesystem> does not work with any known linker flags])
+fi
+
+# prefer 10 as it's the one we use
+AC_CHECK_PROGS(CLANG_FORMAT, [clang-format-10 clang-format])
 AM_CONDITIONAL([USE_CLANG_FORMAT], [test "x$CLANG_FORMAT" != "x"])
 
 AX_VALGRIND_CHECK
@@ -334,6 +371,11 @@ AC_ARG_ENABLE(tracy-capture,
         [Enable 'tracy' profiler/tracer capture program]))
 AM_CONDITIONAL(USE_TRACY_CAPTURE, [test x$enable_tracy_capture = xyes])
 
+AC_ARG_ENABLE(tracy-csvexport,
+    AS_HELP_STRING([--enable-tracy-csvexport],
+        [Enable 'tracy' profiler/tracer csvexport program]))
+AM_CONDITIONAL(USE_TRACY_CSVEXPORT, [test x$enable_tracy_csvexport = xyes])
+
 AC_ARG_ENABLE(spdlog,
     AS_HELP_STRING([--disable-spdlog],
         [Disable spdlog]))
@@ -348,10 +390,11 @@ AM_CONDITIONAL(ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION,
 AC_ARG_ENABLE(libunwind,
     AS_HELP_STRING([--disable-libunwind],
         [Disable backtraces using libunwind]))
-if test x"$enable_libunwind" = xyes; then
+if test x"$enable_libunwind" != xno; then
     case "${host_os}" in
         *darwin*)
             # libunwind comes standard with the command-line tools on macos
+            AC_MSG_NOTICE([using platform-native libunwind])
             AC_DEFINE([HAVE_LIBUNWIND], [1],
                 [Define to 1 if you have the <libunwind.h> header file])
             ;;
@@ -380,6 +423,34 @@ if test x"$enable_libunwind" = xyes; then
             esac
             ;;
     esac
+else
+  AC_MSG_NOTICE([not using libunwind as it was not requested])
+fi
+
+# When we shift to having Rust in the current protocol version, this block should be
+# made unconditional. For the time being Rust is still "in the next protocol".
+if test x"$enable_next_protocol_version_unsafe_for_production" = xyes; then
+  AC_PATH_PROG(CARGO, cargo)
+  if test x"$CARGO" = x; then
+    AC_MSG_ERROR([cannot find cargo, needed for rust code])
+  fi
+  CARGO_VERSION="$(${CARGO} --version)"
+  CARGO_VERSION="${CARGO_VERSION#cargo}"
+  AX_COMPARE_VERSION([${CARGO_VERSION}],[ge],[1.57],[],[
+    AC_MSG_ERROR([cargo version too old (need >= 1.57)])
+  ])
+  AC_ARG_VAR(CARGO)
+
+  AC_PATH_PROG(RUSTC, rustc)
+  if test x"$RUSTC" = x; then
+    AC_MSG_ERROR([cannot find rustc, needed for rust code])
+  fi
+  RUSTC_VERSION="$(${RUSTC} --version)"
+  RUSTC_VERSION="${RUSTC_VERSION#rustc}"
+  AX_COMPARE_VERSION([${RUSTC_VERSION}],[ge],[1.57],[],[
+    AC_MSG_ERROR([rustc version too old (need >= 1.57)])
+  ])
+  AC_ARG_VAR(RUSTC)
 fi
 
 # Need this to pass through ccache for xdrpp, libsodium

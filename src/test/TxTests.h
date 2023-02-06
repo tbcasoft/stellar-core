@@ -80,10 +80,28 @@ void validateTxResults(TransactionFramePtr const& tx, Application& app,
                        ValidationResult validationResult,
                        TransactionResult const& applyResult = {});
 
+void checkLiquidityPool(Application& app, PoolID const& poolID,
+                        int64_t reserveA, int64_t reserveB,
+                        int64_t totalPoolShares,
+                        int64_t poolSharesTrustLineCount);
+
 TxSetResultMeta
-closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+closeLedger(Application& app,
+            std::vector<TransactionFrameBasePtr> const& txs = {},
+            bool strictOrder = false);
+
+TxSetResultMeta
+closeLedgerOn(Application& app, int day, int month, int year,
               std::vector<TransactionFrameBasePtr> const& txs = {},
               bool strictOrder = false);
+
+TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, TimePoint closeTime,
+              std::vector<TransactionFrameBasePtr> const& txs = {},
+              bool strictOrder = false);
+
+TxSetResultMeta closeLedgerOn(Application& app, uint32 ledgerSeq,
+                              time_t closeTime, TxSetFrameConstPtr txSet);
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
@@ -104,21 +122,27 @@ bool doesAccountExist(Application& app, PublicKey const& k);
 xdr::xvector<Signer, 20> getAccountSigners(PublicKey const& k,
                                            Application& app);
 
-TransactionFramePtr
-transactionFromOperationsV0(Application& app, SecretKey const& from,
-                            SequenceNumber seq,
-                            std::vector<Operation> const& ops, int fee = 0);
+TransactionFramePtr transactionFromOperationsV0(
+    Application& app, SecretKey const& from, SequenceNumber seq,
+    std::vector<Operation> const& ops, uint32_t fee = 0);
 TransactionFramePtr
 transactionFromOperationsV1(Application& app, SecretKey const& from,
                             SequenceNumber seq,
-                            std::vector<Operation> const& ops, int fee = 0);
+                            std::vector<Operation> const& ops, uint32_t fee,
+                            std::optional<PreconditionsV2> cond = std::nullopt);
 TransactionFramePtr transactionFromOperations(Application& app,
                                               SecretKey const& from,
                                               SequenceNumber seq,
                                               std::vector<Operation> const& ops,
-                                              int fee = 0);
+                                              uint32_t fee = 0);
+TransactionFramePtr transactionWithV2Precondition(Application& app,
+                                                  TestAccount& account,
+                                                  int64_t sequenceDelta,
+                                                  uint32_t fee,
+                                                  PreconditionsV2 const& cond);
 
 Operation changeTrust(Asset const& asset, int64_t limit);
+Operation changeTrust(ChangeTrustAsset const& asset, int64_t limit);
 
 Operation allowTrust(PublicKey const& trustor, Asset const& asset,
                      uint32_t authorize);
@@ -217,10 +241,19 @@ Operation revokeSponsorship(AccountID const& accID, SignerKey const& key);
 Operation clawback(AccountID const& from, Asset const& asset, int64_t amount);
 Operation clawbackClaimableBalance(ClaimableBalanceID const& balanceID);
 
+Operation liquidityPoolDeposit(PoolID const& poolID, int64_t maxAmountA,
+                               int64_t maxAmountB, Price const& minPrice,
+                               Price const& maxPrice);
+Operation liquidityPoolWithdraw(PoolID const& poolID, int64_t amount,
+                                int64_t minAmountA, int64_t minAmountB);
+
 Asset makeNativeAsset();
 Asset makeInvalidAsset();
 Asset makeAsset(SecretKey const& issuer, std::string const& code);
 Asset makeAssetAlphanum12(SecretKey const& issuer, std::string const& code);
+ChangeTrustAsset makeChangeTrustAssetPoolShare(Asset const& assetA,
+                                               Asset const& assetB,
+                                               int32_t fee);
 
 OperationFrame const& getFirstOperationFrame(TransactionFrame const& tx);
 OperationResult const& getFirstResult(TransactionFrame const& tx);
@@ -235,6 +268,19 @@ void checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected,
 TransactionFrameBasePtr
 transactionFrameFromOps(Hash const& networkID, TestAccount& source,
                         std::vector<Operation> const& ops,
-                        std::vector<SecretKey> const& opKeys);
+                        std::vector<SecretKey> const& opKeys,
+                        std::optional<PreconditionsV2> cond = std::nullopt);
+
+LedgerUpgrade makeBaseReserveUpgrade(int baseReserve);
+
+LedgerHeader executeUpgrades(Application& app,
+                             xdr::xvector<UpgradeType, 6> const& upgrades);
+
+LedgerHeader executeUpgrade(Application& app, LedgerUpgrade const& lupgrade);
+
+void
+depositTradeWithdrawTest(Application& app, TestAccount& root, int depositSize,
+                         std::vector<std::pair<bool, int64_t>> const& trades);
+
 } // end txtest namespace
 }

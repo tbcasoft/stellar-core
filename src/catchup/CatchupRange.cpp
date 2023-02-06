@@ -6,6 +6,7 @@
 #include "catchup/CatchupConfiguration.h"
 #include "history/HistoryManager.h"
 #include "ledger/LedgerManager.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include <fmt/format.h>
 
@@ -16,7 +17,8 @@ void
 checkCatchupPreconditions(uint32_t lastClosedLedger,
                           CatchupConfiguration const& configuration)
 {
-    if (lastClosedLedger == 0)
+    if (lastClosedLedger < LedgerManager::GENESIS_LEDGER_SEQ &&
+        !configuration.localBucketsOnly())
     {
         throw std::invalid_argument{"lastClosedLedger == 0"};
     }
@@ -56,7 +58,7 @@ calculateCatchupRange(uint32_t lcl, CatchupConfiguration const& cfg,
     }
 
     // All remaining cases have LCL == genesis.
-    assert(lcl == init);
+    releaseAssert(lcl == init || cfg.localBucketsOnly());
     LedgerRange fullReplay(init + 1, fullReplayCount);
 
     // Case 2: full replay because count >= target - init.
@@ -67,7 +69,8 @@ calculateCatchupRange(uint32_t lcl, CatchupConfiguration const& cfg,
 
     // Case 3: special case of buckets only, no replay; only
     // possible when targeting the exact end of a checkpoint.
-    if (cfg.count() == 0 && hm.isLastLedgerInCheckpoint(cfg.toLedger()))
+    if (cfg.count() == 0 &&
+        (hm.isLastLedgerInCheckpoint(cfg.toLedger()) || cfg.localBucketsOnly()))
     {
         return CatchupRange(cfg.toLedger());
     }
@@ -122,6 +125,10 @@ CatchupRange::CatchupRange(uint32_t lastClosedLedger,
     : CatchupRange(calculateCatchupRange(lastClosedLedger, configuration,
                                          historyManager))
 {
+    if (configuration.localBucketsOnly())
+    {
+        releaseAssert(applyBuckets());
+    }
     checkInvariants();
 }
 
@@ -129,28 +136,28 @@ void
 CatchupRange::checkInvariants()
 {
     // Must be applying buckets and/or replaying.
-    assert(applyBuckets() || replayLedgers());
+    releaseAssert(applyBuckets() || replayLedgers());
 
     if (!applyBuckets() && replayLedgers())
     {
         // Cases 1, 2 and 4: no buckets, only replay.
-        assert(mApplyBucketsAtLedger == 0);
-        assert(mReplayRange.mFirst != 0);
+        releaseAssert(mApplyBucketsAtLedger == 0);
+        releaseAssert(mReplayRange.mFirst != 0);
     }
 
     else if (applyBuckets() && replayLedgers())
     {
         // Case 5: buckets and replay.
-        assert(mApplyBucketsAtLedger != 0);
-        assert(mReplayRange.mFirst != 0);
-        assert(mApplyBucketsAtLedger + 1 == mReplayRange.mFirst);
+        releaseAssert(mApplyBucketsAtLedger != 0);
+        releaseAssert(mReplayRange.mFirst != 0);
+        releaseAssert(mApplyBucketsAtLedger + 1 == mReplayRange.mFirst);
     }
 
     else
     {
         // Case 3: buckets only, no replay.
-        assert(applyBuckets() && !replayLedgers());
-        assert(mReplayRange.mFirst == 0);
+        releaseAssert(applyBuckets() && !replayLedgers());
+        releaseAssert(mReplayRange.mFirst == 0);
     }
 }
 }

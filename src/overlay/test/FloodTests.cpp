@@ -11,6 +11,7 @@
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/OverlayManager.h"
+#include "overlay/OverlayMetrics.h"
 #include "overlay/PeerDoor.h"
 #include "overlay/TCPPeer.h"
 #include "simulation/Simulation.h"
@@ -31,14 +32,6 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
     Hash networkID = sha256(getTestConfig().NETWORK_PASSPHRASE);
     Simulation::pointer simulation;
 
-    auto cfgGen = [](int cfgNum) {
-        Config cfg = getTestConfig(cfgNum);
-        // do not close ledgers
-        cfg.MANUAL_CLOSE = true;
-        cfg.FORCE_SCP = false;
-        return cfg;
-    };
-
     const int nbTx = 100;
 
     std::vector<TestAccount> sources;
@@ -47,7 +40,8 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
     std::vector<std::shared_ptr<Application>> nodes;
 
     auto test = [&](std::function<void(int)> inject,
-                    std::function<bool(std::shared_ptr<Application>)> acked) {
+                    std::function<bool(std::shared_ptr<Application>)> acked,
+                    bool syncNodes) {
         simulation->startAllNodes();
 
         nodes = simulation->getNodes();
@@ -80,10 +74,24 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             }
         }
 
-        expectedSeq = root.getLastSequenceNumber() + 1;
+        if (syncNodes)
+        {
+            // Wait until all nodes externalize
+            simulation->crankUntil(
+                [&]() { return simulation->haveAllExternalized(2, 1); },
+                std::chrono::seconds(1), false);
+            for (auto const& n : nodes)
+            {
+                REQUIRE(n->getLedgerManager().isSynced());
+            }
+        }
+        else
+        {
+            // enough for connections to be made
+            simulation->crankForAtLeast(std::chrono::seconds(1), false);
+        }
 
-        // enough for connections to be made
-        simulation->crankForAtLeast(std::chrono::seconds(1), false);
+        expectedSeq = root.getLastSequenceNumber() + 1;
 
         LOG_DEBUG(DEFAULT_LOG, "Injecting work");
 
@@ -145,9 +153,10 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
 
             // this is basically a modified version of Peer::recvTransaction
             auto msg = tx1->toStellarMessage();
-            auto res = inApp->getHerder().recvTransaction(tx1);
+            auto res = inApp->getHerder().recvTransaction(tx1, false);
             REQUIRE(res == TransactionQueue::AddResult::ADD_STATUS_PENDING);
-            inApp->getOverlayManager().broadcastMessage(msg);
+            inApp->getOverlayManager().broadcastMessage(msg, false,
+                                                        tx1->getFullHash());
         };
 
         auto ackedTransactions = [&](std::shared_ptr<Application> app) {
@@ -168,59 +177,221 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             return res;
         };
 
-        auto txFloodingTests = [&](bool delayed) {
-            auto cfgGen2 = [&](int n) {
-                auto cfg = cfgGen(n);
+        auto cfgGen2 = [&](int n) {
+            auto cfg = getTestConfig(n);
+            // adjust delayed tx flooding
+            cfg.FLOOD_TX_PERIOD_MS = 10;
+            return cfg;
+        };
+        SECTION("core")
+        {
+            SECTION("loopback")
+            {
+                simulation = Topologies::core(
+                    4, .666f, Simulation::OVER_LOOPBACK, networkID, cfgGen2);
+                test(injectTransaction, ackedTransactions, true);
+            }
+            SECTION("tcp")
+            {
+                simulation = Topologies::core(4, .666f, Simulation::OVER_TCP,
+                                              networkID, cfgGen2);
+                test(injectTransaction, ackedTransactions, true);
+            }
+            auto cfgGenPullMode = [&](int n) {
+                auto cfg = getTestConfig(n);
                 // adjust delayed tx flooding
-                cfg.FLOOD_TX_PERIOD_MS = delayed ? 10 : 0;
+                cfg.FLOOD_TX_PERIOD_MS = 10;
+                // Using an unrealistically small tx set size
+                // leads to an unrealistic batching scheme of adverts/demands
+                // (i.e., no batching)
+                // While there's no strict requirement for batching,
+                // it seems more useful to test more realistic settings.
+                cfg.TESTING_UPGRADE_MAX_TX_SET_SIZE = 1000;
+                cfg.ENABLE_PULL_MODE = true;
                 return cfg;
             };
-            SECTION("core")
+            SECTION("pull mode with 2 nodes")
             {
-                SECTION("loopback")
-                {
-                    simulation =
-                        Topologies::core(4, .666f, Simulation::OVER_LOOPBACK,
-                                         networkID, cfgGen2);
-                    test(injectTransaction, ackedTransactions);
-                }
-                SECTION("tcp")
-                {
-                    simulation = Topologies::core(
-                        4, .666f, Simulation::OVER_TCP, networkID, cfgGen2);
-                    test(injectTransaction, ackedTransactions);
-                }
-            }
+                // Limit the number of nodes to 2.
+                // This makes the process of flooding crystal clear.
+                int const numNodes = 2;
 
-            SECTION("outer nodes")
+                simulation =
+                    Topologies::core(numNodes, .666f, Simulation::OVER_LOOPBACK,
+                                     networkID, cfgGenPullMode);
+                auto advertCheck = [&](std::shared_ptr<Application> app) {
+                    if (!ackedTransactions(app))
+                    {
+                        return false;
+                    }
+
+                    // Check pull-mode metrics
+                    auto& om = app->getOverlayManager().getOverlayMetrics();
+                    auto advertsSent = om.mSendFloodAdvertMeter.count();
+                    auto advertsRecvd = om.mRecvFloodAdvertTimer.count();
+                    auto demandsSent = om.mSendFloodDemandMeter.count();
+                    auto hashesQueued =
+                        app->getMetrics()
+                            .NewMeter({"overlay", "flood", "advertised"},
+                                      "message")
+                            .count();
+                    auto demandFulfilled =
+                        app->getMetrics()
+                            .NewMeter({"overlay", "flood", "fulfilled"},
+                                      "message")
+                            .count();
+                    auto messagesUnfulfilled =
+                        app->getMetrics()
+                            .NewMeter(
+                                {"overlay", "flood", "unfulfilled-unknown"},
+                                "message")
+                            .count() +
+                        app->getMetrics()
+                            .NewMeter(
+                                {"overlay", "flood", "unfulfilled-banned"},
+                                "message")
+                            .count();
+
+                    LOG_DEBUG(
+                        DEFAULT_LOG,
+                        "Peer {}: sent {} adverts, queued {} codes, received "
+                        "{} adverts, sent {} demands, fulfilled {} demands, "
+                        "unfulfilled {} demands",
+                        app->getConfig().PEER_PORT, advertsSent, hashesQueued,
+                        advertsRecvd, demandsSent, demandFulfilled,
+                        messagesUnfulfilled);
+
+                    // There are only two peers.
+                    // Each should send one or more advert(s) with exactly (nbTx
+                    // / 2) hashes to each other, and demand & fulfill
+                    // demands(s). The number of demands may depend on how many
+                    // hashes are in one demand.
+
+                    bool res = true;
+                    res = res && advertsSent >= 1 && advertsRecvd >= 1;
+                    res = res && hashesQueued == (nbTx / 2);
+                    res = res && demandFulfilled >= 1 && demandsSent >= 1;
+                    res = res && messagesUnfulfilled == 0;
+
+                    return res;
+                };
+                test(injectTransaction, advertCheck, true);
+            }
+            SECTION("pull mode with 4 nodes")
             {
-                SECTION("loopback")
-                {
-                    simulation = Topologies::hierarchicalQuorumSimplified(
-                        5, 10, Simulation::OVER_LOOPBACK, networkID, cfgGen2);
-                    test(injectTransaction, ackedTransactions);
-                }
-                SECTION("tcp")
-                {
-                    simulation = Topologies::hierarchicalQuorumSimplified(
-                        5, 10, Simulation::OVER_TCP, networkID, cfgGen2);
-                    test(injectTransaction, ackedTransactions);
-                }
-            }
-        };
+                int const numNodes = 4;
 
-        SECTION("direct tx broadcast")
-        {
-            txFloodingTests(false);
+                simulation =
+                    Topologies::core(numNodes, .666f, Simulation::OVER_TCP,
+                                     networkID, cfgGenPullMode);
+                auto advertCheck = [&](std::shared_ptr<Application> app) {
+                    if (!ackedTransactions(app))
+                    {
+                        return false;
+                    }
+
+                    // Check pull-mode metrics
+                    auto& om = app->getOverlayManager().getOverlayMetrics();
+                    auto advertsSent = om.mSendFloodAdvertMeter.count();
+                    auto advertsRecvd = om.mRecvFloodAdvertTimer.count();
+                    auto demandsSent = om.mSendFloodDemandMeter.count();
+                    auto hashesQueued =
+                        app->getMetrics()
+                            .NewMeter({"overlay", "flood", "advertised"},
+                                      "message")
+                            .count();
+                    auto demandFulfilled =
+                        app->getMetrics()
+                            .NewMeter({"overlay", "flood", "fulfilled"},
+                                      "message")
+                            .count();
+                    auto messagesUnfulfilled =
+                        app->getMetrics()
+                            .NewMeter(
+                                {"overlay", "flood", "unfulfilled-unknown"},
+                                "message")
+                            .count() +
+                        app->getMetrics()
+                            .NewMeter(
+                                {"overlay", "flood", "unfulfilled-banned"},
+                                "message")
+                            .count();
+
+                    LOG_DEBUG(
+                        DEFAULT_LOG,
+                        "Peer {}: sent {} adverts, queued {} codes, received "
+                        "{} adverts, sent {} demands, fulfilled {} demands, "
+                        "unfulfilled {} demands",
+                        app->getConfig().PEER_PORT, advertsSent, hashesQueued,
+                        advertsRecvd, demandsSent, demandFulfilled,
+                        messagesUnfulfilled);
+
+                    // There are four peers.
+                    // Each node starts with 25 txns.
+                    // For every node to get all the 100 txns,
+                    // every node has to advertise, demand, and fulfill demands
+                    // at least once.
+                    // No node should do so more than 3 * nbTx times.
+
+                    bool res = true;
+
+                    res = res && 1 <= advertsSent && advertsSent <= 3 * nbTx;
+                    res = res && 1 <= advertsRecvd && advertsRecvd <= 3 * nbTx;
+
+                    // If this node queued < 25 hashes and/or responded to < 25
+                    // demands, then no other node can obtain the 25 txns that
+                    // this node has.
+                    res = res && (nbTx / 4) <= hashesQueued;
+                    res = res && hashesQueued <= 3 * nbTx;
+                    res = res && (nbTx / 4) <= demandFulfilled;
+                    res = res && demandFulfilled <= 3 * nbTx;
+
+                    res = res && 1 <= demandsSent && demandsSent <= 3 * nbTx;
+
+                    // Each advert must contain at least one hash.
+                    res = res && advertsSent <= hashesQueued;
+
+                    // # demands fullfulled
+                    // <= # demands sent
+                    // <= # hashes sent
+                    // <= # hashes queued.
+                    res = res && demandFulfilled <= hashesQueued;
+
+                    res = res && messagesUnfulfilled == 0;
+
+                    return res;
+                };
+                test(injectTransaction, advertCheck, true);
+            }
         }
-        SECTION("delayed tx broadcast")
+
+        SECTION("outer nodes")
         {
-            txFloodingTests(true);
+            SECTION("loopback")
+            {
+                simulation = Topologies::hierarchicalQuorumSimplified(
+                    5, 10, Simulation::OVER_LOOPBACK, networkID, cfgGen2);
+                test(injectTransaction, ackedTransactions, true);
+            }
+            SECTION("tcp")
+            {
+                simulation = Topologies::hierarchicalQuorumSimplified(
+                    5, 10, Simulation::OVER_TCP, networkID, cfgGen2);
+                test(injectTransaction, ackedTransactions, true);
+            }
         }
     }
 
     SECTION("scp messages flooding")
     {
+        auto cfgGen = [](int cfgNum) {
+            Config cfg = getTestConfig(cfgNum);
+            // do not close ledgers
+            cfg.MANUAL_CLOSE = true;
+            cfg.FORCE_SCP = false;
+            return cfg;
+        };
+
         // SCP messages depend on
         // a quorum set
         // a valid transaction set
@@ -247,11 +418,8 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                 {createAccount(dest.getPublicKey(), txAmount)}, expectedSeq);
 
             // create the transaction set containing this transaction
-            auto const& lcl =
-                inApp->getLedgerManager().getLastClosedLedgerHeader();
-            TxSetFrame txSet(lcl.hash);
-            txSet.add(tx1);
-            txSet.sortForHash();
+
+            auto txSet = TxSetFrame::makeFromTransactions({tx1}, *inApp, 0, 0);
             auto& herder = static_cast<HerderImpl&>(inApp->getHerder());
 
             // build the quorum set used by this message
@@ -261,13 +429,14 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             qset.validators.emplace_back(sources[i]);
 
             Hash qSetHash = sha256(xdr::xdr_to_opaque(qset));
-
+            auto const& lcl =
+                inApp->getLedgerManager().getLastClosedLedgerHeader();
             // build an SCP message for the next ledger
             auto ct = std::max<uint64>(
                 lcl.header.scpValue.closeTime + 1,
                 VirtualClock::to_time_t(inApp->getClock().system_now()));
             StellarValue sv = herder.makeStellarValue(
-                txSet.getContentsHash(), ct, emptyUpgradeSteps, keys[0]);
+                txSet->getContentsHash(), ct, emptyUpgradeSteps, keys[0]);
 
             SCPEnvelope envelope;
 
@@ -335,14 +504,14 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                 simulation =
                     Topologies::core(4, 1.0f, Simulation::OVER_LOOPBACK,
                                      networkID, cfgGen, quorumAdjuster);
-                test(injectSCP, ackedSCP);
+                test(injectSCP, ackedSCP, false);
             }
             SECTION("tcp")
             {
                 simulation =
                     Topologies::core(4, 1.0f, Simulation::OVER_TCP, networkID,
                                      cfgGen, quorumAdjuster);
-                test(injectSCP, ackedSCP);
+                test(injectSCP, ackedSCP, false);
             }
         }
 
@@ -353,14 +522,14 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                 simulation = Topologies::hierarchicalQuorumSimplified(
                     5, 10, Simulation::OVER_LOOPBACK, networkID, cfgGen, 1,
                     quorumAdjuster);
-                test(injectSCP, ackedSCP);
+                test(injectSCP, ackedSCP, false);
             }
             SECTION("tcp")
             {
                 simulation = Topologies::hierarchicalQuorumSimplified(
                     5, 10, Simulation::OVER_TCP, networkID, cfgGen, 1,
                     quorumAdjuster);
-                test(injectSCP, ackedSCP);
+                test(injectSCP, ackedSCP, false);
             }
         }
     }

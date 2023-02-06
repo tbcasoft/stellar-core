@@ -3,6 +3,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "WorkSequence.h"
+#include "util/GlobalChecks.h"
+#include "work/Work.h"
 #include <Tracy.hpp>
 
 namespace stellar
@@ -10,10 +12,11 @@ namespace stellar
 
 WorkSequence::WorkSequence(Application& app, std::string name,
                            std::vector<std::shared_ptr<BasicWork>> sequence,
-                           size_t maxRetries)
+                           size_t maxRetries, bool stopAtFirstFailure)
     : BasicWork(app, std::move(name), maxRetries)
     , mSequenceOfWork(std::move(sequence))
     , mNextInSequence(mSequenceOfWork.begin())
+    , mStopAtFirstFailure(stopAtFirstFailure)
 {
 }
 
@@ -23,12 +26,13 @@ WorkSequence::onRun()
     ZoneScoped;
     if (mNextInSequence == mSequenceOfWork.end())
     {
-        // Completed all the work
-        return State::WORK_SUCCESS;
+        // Completed the work.
+        return WorkUtils::getWorkStatus(
+            std::list(mSequenceOfWork.begin(), mSequenceOfWork.end()));
     }
 
     auto w = *mNextInSequence;
-    assert(w);
+    releaseAssert(w);
     if (!mCurrentExecuting)
     {
         w->startWork(wakeSelfUpCallback());
@@ -37,7 +41,8 @@ WorkSequence::onRun()
     else
     {
         auto state = w->getState();
-        if (state == State::WORK_SUCCESS)
+        if (state == State::WORK_SUCCESS ||
+            (state == State::WORK_FAILURE && !mStopAtFirstFailure))
         {
             mCurrentExecuting = nullptr;
             ++mNextInSequence;
@@ -69,7 +74,7 @@ void
 WorkSequence::onReset()
 {
     ZoneScoped;
-    assert(std::all_of(
+    releaseAssert(std::all_of(
         mSequenceOfWork.cbegin(), mNextInSequence,
         [](std::shared_ptr<BasicWork> const& w) { return w->isDone(); }));
     mNextInSequence = mSequenceOfWork.begin();

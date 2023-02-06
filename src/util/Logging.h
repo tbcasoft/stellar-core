@@ -124,7 +124,7 @@ typedef void* LogPtr;
 namespace stellar
 {
 
-enum class LogLevel
+enum class LogLevel : uint8_t
 {
     LVL_FATAL = 0,
     LVL_ERROR = 1,
@@ -165,6 +165,7 @@ class Logging
     static bool mColor;
     static std::string mLastPattern;
     static std::string mLastFilenamePattern;
+    static bool mLogToConsole;
 #define LOG_PARTITION(name) static LogPtr name##LogPtr;
 #include "util/LogPartitions.def"
 #undef LOG_PARTITION
@@ -175,6 +176,7 @@ class Logging
     static void deinit();
     static void setFmt(std::string const& peerID, bool timestamps = true);
     static void setLoggingToFile(std::string const& filename);
+    static void setLoggingToConsole(bool console);
     static void setLoggingColor(bool color);
     static void setLogLevel(LogLevel level, const char* partition);
     static LogLevel getLLfromString(std::string const& levelName);
@@ -182,6 +184,9 @@ class Logging
     static std::string getStringFromLL(LogLevel level);
     static bool logDebug(std::string const& partition);
     static bool logTrace(std::string const& partition);
+    static bool isLogLevelAtLeast(std::string const& partition, LogLevel level);
+    static void logAtPartitionAndLevel(std::string const& partition,
+                                       LogLevel level, std::string const& msg);
     static void rotate();
     static std::string normalizePartition(std::string const& partition);
 

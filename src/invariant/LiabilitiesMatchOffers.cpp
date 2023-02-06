@@ -9,6 +9,7 @@
 #include "main/Application.h"
 #include "transactions/OfferExchange.h"
 #include "transactions/TransactionUtils.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDRCereal.h"
 #include "util/types.h"
 #include "xdrpp/printer.h"
@@ -16,6 +17,9 @@
 
 namespace stellar
 {
+
+typedef std::map<AccountID, std::map<TrustLineAsset, Liabilities>>
+    LiabilitiesMap;
 
 static int64_t
 getOfferBuyingLiabilities(LedgerEntry const& le)
@@ -98,9 +102,9 @@ checkAuthorized(LedgerEntry const* current, LedgerEntry const* previous)
 
                 if (sellingLiabilitiesInc || buyingLiabilitiesInc)
                 {
-                    return fmt::format(
-                        "Liabilities increased on unauthorized trust line {}",
-                        xdr_to_string(trust, "TrustLineEntry"));
+                    return fmt::format(FMT_STRING("Liabilities increased on "
+                                                  "unauthorized trust line {}"),
+                                       xdr_to_string(trust, "TrustLineEntry"));
                 }
             }
             else
@@ -109,7 +113,8 @@ checkAuthorized(LedgerEntry const* current, LedgerEntry const* previous)
                     getBuyingLiabilities(*current) > 0)
                 {
                     return fmt::format(
-                        "Unauthorized trust line has liabilities {}",
+                        FMT_STRING(
+                            "Unauthorized trust line has liabilities {}"),
                         xdr_to_string(trust, "TrustLineEntry"));
                 }
             }
@@ -134,9 +139,8 @@ checkAuthorized(std::shared_ptr<InternalLedgerEntry const> const& genCurrent,
 }
 
 static void
-addOrSubtractLiabilities(
-    std::map<AccountID, std::map<Asset, Liabilities>>& deltaLiabilities,
-    LedgerEntry const* entry, bool isAdd)
+addOrSubtractLiabilities(LiabilitiesMap& deltaLiabilities,
+                         LedgerEntry const* entry, bool isAdd)
 {
     if (!entry)
     {
@@ -148,7 +152,7 @@ addOrSubtractLiabilities(
     if (entry->data.type() == ACCOUNT)
     {
         auto const& account = entry->data.account();
-        Asset native(ASSET_TYPE_NATIVE);
+        TrustLineAsset native(ASSET_TYPE_NATIVE);
         deltaLiabilities[account.accountID][native].selling -=
             sign * getSellingLiabilities(*entry);
         deltaLiabilities[account.accountID][native].buying -=
@@ -165,16 +169,18 @@ addOrSubtractLiabilities(
     else if (entry->data.type() == OFFER)
     {
         auto const& offer = entry->data.offer();
-        if (offer.selling.type() == ASSET_TYPE_NATIVE ||
-            !(getIssuer(offer.selling) == offer.sellerID))
+        if (!isIssuer(offer.sellerID, offer.selling))
         {
-            deltaLiabilities[offer.sellerID][offer.selling].selling +=
+            deltaLiabilities[offer.sellerID]
+                            [assetToTrustLineAsset(offer.selling)]
+                                .selling +=
                 sign * getOfferSellingLiabilities(*entry);
         }
-        if (offer.buying.type() == ASSET_TYPE_NATIVE ||
-            !(getIssuer(offer.buying) == offer.sellerID))
+        if (!isIssuer(offer.sellerID, offer.buying))
         {
-            deltaLiabilities[offer.sellerID][offer.buying].buying +=
+            deltaLiabilities[offer.sellerID]
+                            [assetToTrustLineAsset(offer.buying)]
+                                .buying +=
                 sign * getOfferBuyingLiabilities(*entry);
         }
     }
@@ -182,7 +188,7 @@ addOrSubtractLiabilities(
 
 static void
 addOrSubtractLiabilities(
-    std::map<AccountID, std::map<Asset, Liabilities>>& deltaLiabilities,
+    LiabilitiesMap& deltaLiabilities,
     std::shared_ptr<InternalLedgerEntry const> const& genEntry, bool isAdd)
 {
     if (genEntry && genEntry->type() == InternalLedgerEntryType::LEDGER_ENTRY)
@@ -194,7 +200,7 @@ addOrSubtractLiabilities(
 
 static void
 accumulateLiabilities(
-    std::map<AccountID, std::map<Asset, Liabilities>>& deltaLiabilities,
+    LiabilitiesMap& deltaLiabilities,
     std::shared_ptr<InternalLedgerEntry const> const& current,
     std::shared_ptr<InternalLedgerEntry const> const& previous)
 {
@@ -215,7 +221,7 @@ shouldCheckAccount(LedgerEntry const* current, LedgerEntry const* previous,
     auto const& prevAcc = previous->data.account();
 
     bool didBalanceDecrease = currAcc.balance < prevAcc.balance;
-    if (ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_10))
     {
         bool sellingLiabilitiesInc =
             getSellingLiabilities(*current) > getSellingLiabilities(*previous);
@@ -246,7 +252,7 @@ checkBalanceAndLimit(LedgerHeader const& header, LedgerEntry const* current,
         {
             auto const& account = current->data.account();
             Liabilities liabilities;
-            if (ledgerVersion >= 10)
+            if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_10))
             {
                 liabilities.selling = getSellingLiabilities(*current);
                 liabilities.buying = getBuyingLiabilities(*current);
@@ -256,7 +262,8 @@ checkBalanceAndLimit(LedgerHeader const& header, LedgerEntry const* current,
                 (INT64_MAX - account.balance < liabilities.buying))
             {
                 return fmt::format(
-                    "Balance not compatible with liabilities for {}",
+                    FMT_STRING(
+                        "Balance not compatible with liabilities for {}"),
                     xdr_to_string(account, "AccountEntry"));
             }
         }
@@ -265,7 +272,7 @@ checkBalanceAndLimit(LedgerHeader const& header, LedgerEntry const* current,
     {
         auto const& trust = current->data.trustLine();
         Liabilities liabilities;
-        if (ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_10))
         {
             liabilities.selling = getSellingLiabilities(*current);
             liabilities.buying = getBuyingLiabilities(*current);
@@ -273,8 +280,9 @@ checkBalanceAndLimit(LedgerHeader const& header, LedgerEntry const* current,
         if ((trust.balance < liabilities.selling) ||
             (trust.limit - trust.balance < liabilities.buying))
         {
-            return fmt::format("Balance not compatible with liabilities for {}",
-                               xdr_to_string(trust, "TrustLineEntry"));
+            return fmt::format(
+                FMT_STRING("Balance not compatible with liabilities for {}"),
+                xdr_to_string(trust, "TrustLineEntry"));
         }
     }
     return {};
@@ -321,9 +329,9 @@ LiabilitiesMatchOffers::checkOnOperationApply(Operation const& operation,
                                               LedgerTxnDelta const& ltxDelta)
 {
     auto ledgerVersion = ltxDelta.header.current.ledgerVersion;
-    if (ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_10))
     {
-        std::map<AccountID, std::map<Asset, Liabilities>> deltaLiabilities;
+        LiabilitiesMap deltaLiabilities;
         for (auto const& entryDelta : ltxDelta.entry)
         {
             auto checkAuthStr = checkAuthorized(entryDelta.second.current,
@@ -343,9 +351,9 @@ LiabilitiesMatchOffers::checkOnOperationApply(Operation const& operation,
                 if (assetLiabilities.second.buying != 0)
                 {
                     return fmt::format(
-                        "Change in buying liabilities differed from "
-                        "change in total buying liabilities of "
-                        "offers by {} for {} in {}",
+                        FMT_STRING("Change in buying liabilities differed from "
+                                   "change in total buying liabilities of "
+                                   "offers by {:d} for {} in {}"),
                         assetLiabilities.second.buying,
                         xdr_to_string(accLiabilities.first, "account"),
                         xdr_to_string(assetLiabilities.first, "asset"));
@@ -353,9 +361,10 @@ LiabilitiesMatchOffers::checkOnOperationApply(Operation const& operation,
                 else if (assetLiabilities.second.selling != 0)
                 {
                     return fmt::format(
-                        "Change in selling liabilities differed from "
-                        "change in total selling liabilities of "
-                        "offers by {} for {} in {}",
+                        FMT_STRING(
+                            "Change in selling liabilities differed from "
+                            "change in total selling liabilities of "
+                            "offers by {:d} for {} in {}"),
                         assetLiabilities.second.selling,
                         xdr_to_string(accLiabilities.first, "account"),
                         xdr_to_string(assetLiabilities.first, "asset"));

@@ -34,7 +34,7 @@ class WorkScheduler : public Work
     {
         auto work = scheduleWork<T>(std::forward<Args>(args)...);
         auto& clock = mApp.getClock();
-        while (!clock.getIOContext().stopped() && !allChildrenDone())
+        while (!clock.getIOContext().stopped() && !work->isDone())
         {
             clock.crank(true);
         }
@@ -47,7 +47,7 @@ class WorkScheduler : public Work
     std::shared_ptr<T>
     scheduleWork(Args&&... args)
     {
-        if (isAborting())
+        if (isAborting() || isDone())
         {
             return nullptr;
         }

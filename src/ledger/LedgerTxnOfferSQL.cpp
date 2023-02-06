@@ -10,6 +10,7 @@
 #include "main/Config.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Decoder.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
@@ -75,7 +76,7 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
 {
     ZoneScoped;
     // price is an approximation of the actual n/d (truncated math, 15 digits)
-    // ordering by offerid gives precendence to older offers for fairness
+    // ordering by offerid gives precedence to older offers for fairness
     std::string sql = "SELECT sellerid, offerid, sellingasset, buyingasset, "
                       "amount, pricen, priced, flags, lastmodified, extension, "
                       "ledgerext FROM offers "
@@ -114,7 +115,7 @@ LedgerTxnRoot::Impl::loadBestOffers(std::deque<LedgerEntry>& offers,
     }
 
     // price is an approximation of the actual n/d (truncated math, 15 digits)
-    // ordering by offerid gives precendence to older offers for fairness
+    // ordering by offerid gives precedence to older offers for fairness
     std::string sql =
         "WITH r1 AS "
         "(SELECT sellerid, offerid, sellingasset, buyingasset, amount, price, "
@@ -195,8 +196,8 @@ isBetterOffer(LedgerEntry const& lhsEntry, LedgerEntry const& rhsEntry)
     auto const& lhs = lhsEntry.data.offer();
     auto const& rhs = rhsEntry.data.offer();
 
-    assert(lhs.buying == rhs.buying);
-    assert(lhs.selling == rhs.selling);
+    releaseAssert(lhs.buying == rhs.buying);
+    releaseAssert(lhs.selling == rhs.selling);
 
     return isBetterOffer({lhs.price, lhs.offerID}, {rhs.price, rhs.offerID});
 }
@@ -248,64 +249,12 @@ processAsset(std::string const& asset)
     return res;
 }
 
-static std::deque<LedgerEntry>::const_iterator
-loadOffersBeforeV16(StatementContext& prep, std::deque<LedgerEntry>& offers)
-{
-    std::string actIDStrKey;
-    std::string sellingAsset, buyingAsset;
-    std::string extensionStr;
-    soci::indicator extensionInd;
-    std::string ledgerExtStr;
-    soci::indicator ledgerExtInd;
-
-    LedgerEntry le;
-    le.data.type(OFFER);
-    OfferEntry& oe = le.data.offer();
-
-    auto& st = prep.statement();
-    st.exchange(soci::into(actIDStrKey));
-    st.exchange(soci::into(oe.offerID));
-    st.exchange(soci::into(sellingAsset));
-    st.exchange(soci::into(buyingAsset));
-    st.exchange(soci::into(oe.amount));
-    st.exchange(soci::into(oe.price.n));
-    st.exchange(soci::into(oe.price.d));
-    st.exchange(soci::into(oe.flags));
-    st.exchange(soci::into(le.lastModifiedLedgerSeq));
-    st.exchange(soci::into(extensionStr, extensionInd));
-    st.exchange(soci::into(ledgerExtStr, ledgerExtInd));
-    st.define_and_bind();
-    st.execute(true);
-
-    size_t n = 0;
-    while (st.got_data())
-    {
-        ++n;
-        oe.sellerID = KeyUtils::fromStrKey<PublicKey>(actIDStrKey);
-        oe.selling = processAsset(sellingAsset);
-        oe.buying = processAsset(buyingAsset);
-
-        decodeOpaqueXDR(extensionStr, extensionInd, oe.ext);
-
-        // ledgerext always contains v0 prior to 32747294
-        bool extraCond =
-            le.lastModifiedLedgerSeq > 32747293 || !gIsProductionNetwork;
-        if (ledgerExtInd == soci::i_ok && extraCond)
-        {
-            decodeOpaqueXDR(ledgerExtStr, le.ext);
-        }
-
-        offers.emplace_back(le);
-        st.fetch();
-    }
-
-    return offers.cend() - n;
-}
-
 template <typename T>
 static typename T::const_iterator
-loadOffersFromV16(StatementContext& prep, T& offers)
+loadOffersHelper(StatementContext& prep, T& offers)
 {
+    ZoneScoped;
+
     std::string actIDStrKey;
     int64_t offerID;
     std::string sellingAsset, buyingAsset;
@@ -313,9 +262,7 @@ loadOffersFromV16(StatementContext& prep, T& offers)
     Price price;
     uint32_t flags, lastModified;
     std::string extensionStr;
-    soci::indicator extensionInd;
     std::string ledgerExtStr;
-    soci::indicator ledgerExtInd;
 
     auto& st = prep.statement();
     st.exchange(soci::into(actIDStrKey));
@@ -327,8 +274,8 @@ loadOffersFromV16(StatementContext& prep, T& offers)
     st.exchange(soci::into(price.d));
     st.exchange(soci::into(flags));
     st.exchange(soci::into(lastModified));
-    st.exchange(soci::into(extensionStr, extensionInd));
-    st.exchange(soci::into(ledgerExtStr, ledgerExtInd));
+    st.exchange(soci::into(extensionStr));
+    st.exchange(soci::into(ledgerExtStr));
     st.define_and_bind();
     st.execute(true);
 
@@ -350,9 +297,9 @@ loadOffersFromV16(StatementContext& prep, T& offers)
         oe.flags = flags;
         le.lastModifiedLedgerSeq = lastModified;
 
-        decodeOpaqueXDR(extensionStr, extensionInd, oe.ext);
+        decodeOpaqueXDR(extensionStr, oe.ext);
 
-        decodeOpaqueXDR(ledgerExtStr, ledgerExtInd, le.ext);
+        decodeOpaqueXDR(ledgerExtStr, le.ext);
 
         st.fetch();
     }
@@ -364,85 +311,15 @@ std::deque<LedgerEntry>::const_iterator
 LedgerTxnRoot::Impl::loadOffers(StatementContext& prep,
                                 std::deque<LedgerEntry>& offers) const
 {
-    ZoneScoped;
-    if (getHeader().ledgerVersion < 16)
-    {
-        return loadOffersBeforeV16(prep, offers);
-    }
-    return loadOffersFromV16(prep, offers);
-}
-
-static std::vector<LedgerEntry>
-loadOffersBeforeV16(StatementContext& prep)
-{
-    std::vector<LedgerEntry> offers;
-
-    std::string actIDStrKey;
-    std::string sellingAsset, buyingAsset;
-    std::string extensionStr;
-    soci::indicator extensionInd;
-    std::string ledgerExtStr;
-    soci::indicator ledgerExtInd;
-
-    LedgerEntry le;
-    le.data.type(OFFER);
-    OfferEntry& oe = le.data.offer();
-
-    auto& st = prep.statement();
-    st.exchange(soci::into(actIDStrKey));
-    st.exchange(soci::into(oe.offerID));
-    st.exchange(soci::into(sellingAsset));
-    st.exchange(soci::into(buyingAsset));
-    st.exchange(soci::into(oe.amount));
-    st.exchange(soci::into(oe.price.n));
-    st.exchange(soci::into(oe.price.d));
-    st.exchange(soci::into(oe.flags));
-    st.exchange(soci::into(le.lastModifiedLedgerSeq));
-    st.exchange(soci::into(extensionStr, extensionInd));
-    st.exchange(soci::into(ledgerExtStr, ledgerExtInd));
-    st.define_and_bind();
-    st.execute(true);
-
-    while (st.got_data())
-    {
-        oe.sellerID = KeyUtils::fromStrKey<PublicKey>(actIDStrKey);
-        oe.selling = processAsset(sellingAsset);
-        oe.buying = processAsset(buyingAsset);
-
-        decodeOpaqueXDR(extensionStr, extensionInd, oe.ext);
-
-        // ledgerext always contains v0 prior to 32747294
-        bool extraCond =
-            le.lastModifiedLedgerSeq > 32747293 || !gIsProductionNetwork;
-        if (ledgerExtInd == soci::i_ok && extraCond)
-        {
-            decodeOpaqueXDR(ledgerExtStr, le.ext);
-        }
-
-        offers.emplace_back(le);
-        st.fetch();
-    }
-
-    return offers;
-}
-
-static std::vector<LedgerEntry>
-loadOffersFromV16(StatementContext& prep)
-{
-    std::vector<LedgerEntry> offers;
-    loadOffersFromV16(prep, offers);
-    return offers;
+    return loadOffersHelper(prep, offers);
 }
 
 std::vector<LedgerEntry>
 LedgerTxnRoot::Impl::loadOffers(StatementContext& prep) const
 {
-    ZoneScoped;
-    if (getHeader().ledgerVersion < 16)
-    {
-        return loadOffersBeforeV16(prep);
-    }
-    return loadOffersFromV16(prep);
+    std::vector<LedgerEntry> offers;
+    loadOffersHelper(prep, offers);
+    return offers;
 }
 
 class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
@@ -464,7 +341,7 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
     void
     accumulateEntry(LedgerEntry const& entry)
     {
-        assert(entry.data.type() == OFFER);
+        releaseAssert(entry.data.type() == OFFER);
         auto const& offer = entry.data.offer();
 
         mSellerIDs.emplace_back(KeyUtils::toStrKey(offer.sellerID));
@@ -533,8 +410,9 @@ class BulkUpsertOffersOperation : public DatabaseTypeSpecificOperation<void>
 
         for (auto const& e : entries)
         {
-            assert(e.entryExists());
-            assert(e.entry().type() == InternalLedgerEntryType::LEDGER_ENTRY);
+            releaseAssert(e.entryExists());
+            releaseAssert(e.entry().type() ==
+                          InternalLedgerEntryType::LEDGER_ENTRY);
             accumulateEntry(e.entry().ledgerEntry());
         }
     }
@@ -689,9 +567,10 @@ class BulkDeleteOffersOperation : public DatabaseTypeSpecificOperation<void>
     {
         for (auto const& e : entries)
         {
-            assert(!e.entryExists());
-            assert(e.key().type() == InternalLedgerEntryType::LEDGER_ENTRY);
-            assert(e.key().ledgerKey().type() == OFFER);
+            releaseAssert(!e.entryExists());
+            releaseAssert(e.key().type() ==
+                          InternalLedgerEntryType::LEDGER_ENTRY);
+            releaseAssert(e.key().ledgerKey().type() == OFFER);
             auto const& offer = e.key().ledgerKey().offer();
             mOfferIDs.emplace_back(offer.offerID);
         }
@@ -793,10 +672,14 @@ LedgerTxnRoot::Impl::dropOffers()
            "price            DOUBLE PRECISION NOT NULL,"
            "flags            INT              NOT NULL,"
            "lastmodified     INT              NOT NULL,"
+           "extension        TEXT             NOT NULL,"
+           "ledgerext        TEXT             NOT NULL,"
            "PRIMARY KEY      (offerid)"
            ");";
     mDatabase.getSession() << "CREATE INDEX bestofferindex ON offers "
                               "(sellingasset,buyingasset,price,offerid);";
+    mDatabase.getSession() << "CREATE INDEX offerbyseller ON offers "
+                              "(sellerid);";
     if (!mDatabase.isSqlite())
     {
         mDatabase.getSession() << "ALTER TABLE offers "
@@ -824,9 +707,7 @@ class BulkLoadOffersOperation
         int64_t offerID;
         uint32_t flags, lastModified;
         std::string extension;
-        soci::indicator extensionInd;
         std::string ledgerExtension;
-        soci::indicator ledgerExtInd;
         Price price;
 
         st.exchange(soci::into(sellerID));
@@ -838,8 +719,8 @@ class BulkLoadOffersOperation
         st.exchange(soci::into(price.d));
         st.exchange(soci::into(flags));
         st.exchange(soci::into(lastModified));
-        st.exchange(soci::into(extension, extensionInd));
-        st.exchange(soci::into(ledgerExtension, ledgerExtInd));
+        st.exchange(soci::into(extension));
+        st.exchange(soci::into(ledgerExtension));
         st.define_and_bind();
         {
             auto timer = mDb.getSelectTimer("offer");
@@ -867,9 +748,9 @@ class BulkLoadOffersOperation
             oe.flags = flags;
             le.lastModifiedLedgerSeq = lastModified;
 
-            decodeOpaqueXDR(extension, extensionInd, oe.ext);
+            decodeOpaqueXDR(extension, oe.ext);
 
-            decodeOpaqueXDR(ledgerExtension, ledgerExtInd, le.ext);
+            decodeOpaqueXDR(ledgerExtension, le.ext);
 
             st.fetch();
         }
@@ -883,7 +764,7 @@ class BulkLoadOffersOperation
         mOfferIDs.reserve(keys.size());
         for (auto const& k : keys)
         {
-            assert(k.type() == OFFER);
+            releaseAssert(k.type() == OFFER);
             if (k.offer().offerID >= 0)
             {
                 mOfferIDs.emplace_back(k.offer().offerID);

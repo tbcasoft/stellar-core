@@ -127,7 +127,7 @@ To construct such a reference file, run the `verify-checkpoints` command, passin
 usual (to specify the trusted network and quorum slice) and an `--output-filename` argument
 specifying the reference file to save the trusted hashes in.
 
-The emitted content of the refernce file will be a single JSON array of pairs of checkpoint ledger
+The emitted content of the reference file will be a single JSON array of pairs of checkpoint ledger
 numbers and strings holding hashes of ledger headers. For example, it might read:
 
 ```
@@ -225,9 +225,12 @@ consistent.
 #### Offline info
 
 The command `offline-info` fetches information similar to what `info` returns but
-without starting the node.
+without starting the node, writing it directly to standard output.
 
 This allows to quickly see information about the last loaded ledger, supported protocol version etc.
+
+Combine this with logging control flags like `--ll fatal` to suppress informational
+logging output and retrieve a plain JSON object representing the node's state.
 
 #### Testing around a snapshot
 If you want to replay transactions in a specific ledger, you can run a command

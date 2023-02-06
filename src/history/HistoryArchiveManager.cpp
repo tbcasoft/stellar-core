@@ -5,13 +5,16 @@
 #include "history/HistoryArchiveManager.h"
 #include "history/HistoryArchive.h"
 #include "history/HistoryArchiveReportWork.h"
+#include "historywork/CheckSingleLedgerHeaderWork.h"
 #include "historywork/GetHistoryArchiveStateWork.h"
 #include "historywork/PutHistoryArchiveStateWork.h"
+#include "lib/util/stdrandom.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 #include "work/WorkScheduler.h"
+#include "work/WorkSequence.h"
 
 #include <vector>
 
@@ -158,7 +161,7 @@ HistoryArchiveManager::selectRandomReadableHistoryArchive() const
     }
     else
     {
-        std::uniform_int_distribution<size_t> dist(0, archives.size() - 1);
+        stellar::uniform_int_distribution<size_t> dist(0, archives.size() - 1);
         size_t i = dist(gRandomEngine);
         CLOG_DEBUG(History, "Fetching from readable history archive #{}, '{}'",
                    i, archives[i]->getName());
@@ -166,19 +169,32 @@ HistoryArchiveManager::selectRandomReadableHistoryArchive() const
     }
 }
 
-std::shared_ptr<HistoryArchiveReportWork>
-HistoryArchiveManager::scheduleHistoryArchiveReportWork() const
+std::shared_ptr<BasicWork>
+HistoryArchiveManager::getHistoryArchiveReportWork() const
 {
     std::vector<std::shared_ptr<GetHistoryArchiveStateWork>> hasWorks;
     for (auto const& archive : mArchives)
     {
         hasWorks.push_back(std::make_shared<GetHistoryArchiveStateWork>(
-            mApp, 0, archive, "archive-report-" + archive->getName(),
-            BasicWork::RETRY_NEVER));
+            mApp, 0, archive, false, BasicWork::RETRY_NEVER));
     }
-    return mApp.getWorkScheduler().scheduleWork<HistoryArchiveReportWork>(
-        hasWorks);
+    return std::make_shared<HistoryArchiveReportWork>(mApp, hasWorks);
 };
+
+std::shared_ptr<BasicWork>
+HistoryArchiveManager::getCheckLedgerHeaderWork(
+    LedgerHeaderHistoryEntry const& lhhe) const
+{
+    std::vector<std::shared_ptr<BasicWork>> checkWorks;
+    for (auto const& archive : mArchives)
+    {
+        checkWorks.emplace_back(
+            std::make_shared<CheckSingleLedgerHeaderWork>(mApp, archive, lhhe));
+    }
+    return std::make_shared<WorkSequence>(mApp, "archive-ledger-check",
+                                          checkWorks, BasicWork::RETRY_NEVER,
+                                          /*stopOnFirstFailure=*/false);
+}
 
 bool
 HistoryArchiveManager::initializeHistoryArchive(std::string const& arch) const
@@ -251,28 +267,5 @@ HistoryArchiveManager::getWritableHistoryArchives() const
                      return x->hasGetCmd() && x->hasPutCmd();
                  });
     return result;
-}
-
-double
-HistoryArchiveManager::getFailureRate() const
-{
-    uint64_t successCount{0};
-    uint64_t failureCount{0};
-
-    for (auto archive : mArchives)
-    {
-        successCount += archive->getSuccessCount();
-        failureCount += archive->getFailureCount();
-    }
-
-    auto total = successCount + failureCount;
-    if (total == 0)
-    {
-        return 0.0;
-    }
-    else
-    {
-        return static_cast<double>(failureCount) / total;
-    }
 }
 }

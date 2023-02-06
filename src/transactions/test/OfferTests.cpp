@@ -21,6 +21,7 @@
 #include "transactions/OfferExchange.h"
 #include "transactions/TransactionUtils.h"
 #include "transactions/test/SponsorshipTestUtils.h"
+#include "util/ProtocolVersion.h"
 
 using namespace stellar;
 using namespace stellar::txtest;
@@ -33,13 +34,12 @@ using namespace stellar::txtest;
 // Offer for something you can't hold
 // Offer with line full (both accounts)
 
-TEST_CASE("create offer", "[tx][offers]")
+TEST_CASE_VERSIONS("create offer", "[tx][offers]")
 {
     Config const& cfg = getTestConfig(0);
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-    app->start();
 
     // set up world
     auto root = TestAccount::createRoot(*app);
@@ -159,7 +159,7 @@ TEST_CASE("create offer", "[tx][offers]")
             auto a1 = root.create("A", minBalance2);
             a1.changeTrust(idr, trustLineLimit);
             issuer.pay(a1, idr, trustLineLimit);
-            closeLedgerOn(*app, 2, 1, 1, 2016);
+
             // remove issuer
             issuer.merge(root);
             for_versions_to(12, *app, [&] {
@@ -215,7 +215,7 @@ TEST_CASE("create offer", "[tx][offers]")
             auto a1 = root.create("A", minBalance2);
             a1.changeTrust(idr, trustLineLimit);
             issuer.pay(a1, idr, 100);
-            closeLedgerOn(*app, 2, 1, 1, 2016);
+
             // remove issuer
             issuer.merge(root);
 
@@ -708,7 +708,8 @@ TEST_CASE("create offer", "[tx][offers]")
                             ltx.loadHeader().current().ledgerVersion;
                     }
 
-                    if (ledgerVersion < 13)
+                    if (protocolVersionIsBefore(ledgerVersion,
+                                                ProtocolVersion::V_13))
                     {
                         return;
                     }
@@ -2984,8 +2985,19 @@ TEST_CASE("create offer", "[tx][offers]")
             *app, acc2, manageOffer(0, usd, idr, Price{1, 1}, 1000),
             manageOffer(1, usd, idr, Price{1, 1}, 999),
             manageOffer(1, usd, idr, Price{1, 1}, 1001),
-            manageOffer(1, usd, idr, Price{1, 1}, 0), offerKey(acc2, 1));
+            manageOffer(1, usd, idr, Price{1, 1}, 0), offerKey(acc2, 1), 14);
     }
+
+    auto prepareAccount = [&](std::string const& seed) {
+        auto const initBalance = app->getLedgerManager().getLastMinBalance(10);
+
+        auto acc = root.create(seed, initBalance);
+        acc.changeTrust(usd, INT64_MAX);
+        acc.changeTrust(idr, INT64_MAX);
+        issuer.pay(acc, usd, 1000);
+        issuer.pay(acc, idr, 1000);
+        return acc;
+    };
 
     SECTION("crossed sponsored offers")
     {
@@ -3003,18 +3015,6 @@ TEST_CASE("create offer", "[tx][offers]")
             REQUIRE(tx->checkValid(ltx, 0, 0, 0));
             REQUIRE(tx->apply(*app, ltx, txm));
             ltx.commit();
-        };
-
-        auto prepareAccount = [&](std::string const& seed) {
-            auto const initBalance =
-                app->getLedgerManager().getLastMinBalance(10);
-
-            auto acc = root.create(seed, initBalance);
-            acc.changeTrust(usd, INT64_MAX);
-            acc.changeTrust(idr, INT64_MAX);
-            issuer.pay(acc, usd, 1000);
-            issuer.pay(acc, idr, 1000);
-            return acc;
         };
 
         TestMarket market(*app);
@@ -3719,6 +3719,90 @@ TEST_CASE("create offer", "[tx][offers]")
         }
     }
 
+    SECTION(
+        "partially fill resting offer where owner is in a sponsorship sandwich")
+    {
+        for_versions_from(14, *app, [&]() {
+            auto a1 = prepareAccount("accA1");
+            auto a2 = prepareAccount("accA2");
+
+            TestMarket market(*app);
+            auto o1 = market
+                          .requireChangesWithOffer(
+                              {},
+                              [&] {
+                                  return market.addOffer(
+                                      a1, {usd, idr, Price{1, 1}, 100});
+                              })
+                          .key;
+
+            market.requireChangesWithOffer(
+                {{o1, {usd, idr, Price{1, 1}, 50}}}, [&] {
+                    auto tx = transactionFrameFromOps(
+                        app->getNetworkID(), root,
+                        {root.op(beginSponsoringFutureReserves(a1)),
+                         a2.op(manageOffer(0, idr, usd, Price{1, 1}, 50)),
+                         a1.op(endSponsoringFutureReserves())},
+                        {a1, a2});
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    auto expOfferID = ltx.loadHeader().current().idPool + 1;
+
+                    TransactionMeta txm(2);
+                    REQUIRE(tx->checkValid(ltx, 0, 0, 0));
+                    REQUIRE(tx->apply(*app, ltx, txm));
+
+                    REQUIRE(!loadOffer(ltx, a2.getPublicKey(), expOfferID));
+                    ltx.commit();
+
+                    return TestMarketOffer{
+                        {a2, static_cast<int64_t>(expOfferID)},
+                        OfferState::DELETED};
+                });
+
+            // the offer should still not be sponsored
+            LedgerTxn ltx(app->getLedgerTxnRoot());
+            checkSponsorship(ltx, offerKey(o1.sellerID, o1.offerID), 0,
+                             nullptr);
+        });
+    }
+
+    SECTION("modify offer in sponsorship sandwich")
+    {
+        for_versions_from(14, *app, [&]() {
+            auto a1 = prepareAccount("accA1");
+
+            TestMarket market(*app);
+            auto o1 = market
+                          .requireChangesWithOffer(
+                              {},
+                              [&] {
+                                  return market.addOffer(
+                                      a1, {usd, idr, Price{1, 1}, 100});
+                              })
+                          .key;
+            {
+                auto tx = transactionFrameFromOps(
+                    app->getNetworkID(), root,
+                    {root.op(beginSponsoringFutureReserves(a1)),
+                     a1.op(manageOffer(0, usd, idr, Price{1, 1}, 50)),
+                     a1.op(endSponsoringFutureReserves())},
+                    {a1});
+
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                TransactionMeta txm(2);
+                REQUIRE(tx->checkValid(ltx, 0, 0, 0));
+                REQUIRE(tx->apply(*app, ltx, txm));
+                ltx.commit();
+            }
+
+            // the offer should still not be sponsored
+            LedgerTxn ltx(app->getLedgerTxnRoot());
+            checkSponsorship(ltx, offerKey(o1.sellerID, o1.offerID), 0,
+                             nullptr);
+        });
+    }
+
     SECTION("too many sponsoring")
     {
         auto acc1 =
@@ -3729,7 +3813,7 @@ TEST_CASE("create offer", "[tx][offers]")
 
         tooManySponsoring(
             *app, acc1, acc1.op(manageOffer(0, usd, native, Price{1, 1}, 1000)),
-            acc1.op(manageOffer(0, usd, native, Price{1, 1}, 1000)));
+            acc1.op(manageOffer(0, usd, native, Price{1, 1}, 1000)), 1);
     }
 
     SECTION("pull sponsored offers when authorization is revoked")
@@ -3800,7 +3884,9 @@ TEST_CASE("create offer", "[tx][offers]")
         {
             SECTION("allow trust")
             {
-                pullSponsoredOffers(TrustFlagOp::ALLOW_TRUST, issuer);
+                for_versions_from(14, *app, [&]() {
+                    pullSponsoredOffers(TrustFlagOp::ALLOW_TRUST, issuer);
+                });
             }
             SECTION("set trustline flags")
             {
@@ -3817,7 +3903,9 @@ TEST_CASE("create offer", "[tx][offers]")
                 "sponsor", app->getLedgerManager().getLastMinBalance(3));
             SECTION("allow trust")
             {
-                pullSponsoredOffers(TrustFlagOp::ALLOW_TRUST, sponsor);
+                for_versions_from(14, *app, [&]() {
+                    pullSponsoredOffers(TrustFlagOp::ALLOW_TRUST, sponsor);
+                });
             }
             SECTION("set trustline flags")
             {
@@ -3843,12 +3931,11 @@ TEST_CASE("create offer", "[tx][offers]")
     }
 }
 
-TEST_CASE("liabilities match created offer", "[tx][offers]")
+TEST_CASE_VERSIONS("liabilities match created offer", "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
     auto& lm = app->getLedgerManager();
-    app->start();
 
     int64_t txfee = lm.getLastTxFee();
 
@@ -3900,7 +3987,8 @@ TEST_CASE("liabilities match created offer", "[tx][offers]")
         // -> price.d * X > price.n * oe.amount
         //    X > oe.amount * price.n / price.d
         //    X = ceil(oe.amount * price.n / price.d) + 1
-        int64_t crossAmount = bigDivide(amount, price.n, price.d, ROUND_UP);
+        int64_t crossAmount =
+            bigDivideOrThrow(amount, price.n, price.d, ROUND_UP);
         if (crossAmount < INT64_MAX)
         {
             ++crossAmount;
@@ -3949,11 +4037,6 @@ TEST_CASE("liabilities match created offer", "[tx][offers]")
             });
         }
 
-        {
-            LedgerTxn ltx(app->getLedgerTxnRoot());
-            ++ltx.loadHeader().current().ledgerSeq;
-            ltx.commit();
-        }
         mergeAccount(a1);
         mergeAccount(a2);
     };

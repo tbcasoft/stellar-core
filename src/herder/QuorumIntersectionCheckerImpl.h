@@ -179,8 +179,8 @@
 //     C is a quorum and (N \ C) has a quorum
 //
 // and if such a C exists, it will also be discovered by some other branch of
-// the search tree scanning the complement, that is enumerating subsets of (N \
-// C) which has size less than MAXSZ. So there's no point looking at the
+// the search tree scanning the complement, that is enumerating subsets of
+// (N \ C) which has size less than MAXSZ. So there's no point looking at the
 // bigger-than-half subsets in detail. So we add an exit:
 //
 //     def enumerate(C, R):
@@ -354,8 +354,10 @@
 #include "main/Config.h"
 #include "util/BitSet.h"
 #include "util/RandomEvictionCache.h"
+#include "util/TarjanSCCCalculator.h"
 #include "xdr/Stellar-SCP.h"
 #include "xdr/Stellar-types.h"
+#include <functional>
 
 namespace
 {
@@ -389,27 +391,6 @@ struct QBitSet
     void log(size_t indent = 0) const;
 
     static BitSet getSuccessors(BitSet const& nodes, QGraph const& inner);
-};
-
-// Implementation of Tarjan's algorithm for SCC calculation.
-struct TarjanSCCCalculator
-{
-    struct SCCNode
-    {
-        int mIndex = {-1};
-        int mLowLink = {-1};
-        bool mOnStack = {false};
-    };
-
-    std::vector<SCCNode> mNodes;
-    std::vector<size_t> mStack;
-    int mIndex = {0};
-    std::vector<BitSet> mSCCs;
-    QGraph const& mGraph;
-
-    TarjanSCCCalculator(QGraph const& graph);
-    void calculateSCCs();
-    void scc(size_t i);
 };
 
 // A MinQuorumEnumerator is responsible to scanning the powerset of the SCC
@@ -499,14 +480,14 @@ class QuorumIntersectionCheckerImpl : public stellar::QuorumIntersectionChecker
 
     // State to capture a counterexample found during search, for later
     // reporting.
-    mutable std::pair<std::vector<stellar::PublicKey>,
-                      std::vector<stellar::PublicKey>>
+    mutable std::pair<std::vector<stellar::NodeID>,
+                      std::vector<stellar::NodeID>>
         mPotentialSplit;
 
     // These are the key state of the checker: the mapping from node public keys
     // to graph node numbers, and the graph of QBitSets itself.
-    std::vector<stellar::PublicKey> mBitNumPubKeys;
-    std::unordered_map<stellar::PublicKey, size_t> mPubKeyBitNums;
+    std::vector<stellar::NodeID> mBitNumPubKeys;
+    std::unordered_map<stellar::NodeID, size_t> mPubKeyBitNums;
     QGraph mGraph;
 
     // This is a temporary structure that's reused very often within the
@@ -550,7 +531,7 @@ class QuorumIntersectionCheckerImpl : public stellar::QuorumIntersectionChecker
                                   bool quiet = false);
     bool networkEnjoysQuorumIntersection() const override;
 
-    std::pair<std::vector<stellar::PublicKey>, std::vector<stellar::PublicKey>>
+    std::pair<std::vector<stellar::NodeID>, std::vector<stellar::NodeID>>
     getPotentialSplit() const override;
     size_t getMaxQuorumsFound() const override;
 };

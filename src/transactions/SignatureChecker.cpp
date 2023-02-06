@@ -9,7 +9,8 @@
 #include "crypto/SecretKey.h"
 #include "crypto/SignerKey.h"
 #include "transactions/SignatureUtils.h"
-#include "util/Algoritm.h"
+#include "util/Algorithm.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include <Tracy.hpp>
 
@@ -34,7 +35,7 @@ SignatureChecker::checkSignature(std::vector<Signer> const& signersV,
     return true;
 #endif // FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 
-    if (mProtocolVersion == 7)
+    if (protocolVersionEquals(mProtocolVersion, ProtocolVersion::V_7))
     {
         return true;
     }
@@ -55,7 +56,9 @@ SignatureChecker::checkSignature(std::vector<Signer> const& signersV,
         if (signerKey.key.preAuthTx() == mContentsHash)
         {
             auto w = signerKey.weight;
-            if (mProtocolVersion > 9 && w > UINT8_MAX)
+            if (protocolVersionStartsFrom(mProtocolVersion,
+                                          ProtocolVersion::V_10) &&
+                w > UINT8_MAX)
             {
                 w = UINT8_MAX;
             }
@@ -79,7 +82,9 @@ SignatureChecker::checkSignature(std::vector<Signer> const& signersV,
                 {
                     mUsedSignatures[i] = true;
                     auto w = signerKey.weight;
-                    if (mProtocolVersion > 9 && w > UINT8_MAX)
+                    if (protocolVersionStartsFrom(mProtocolVersion,
+                                                  ProtocolVersion::V_10) &&
+                        w > UINT8_MAX)
                     {
                         w = UINT8_MAX;
                     }
@@ -116,6 +121,17 @@ SignatureChecker::checkSignature(std::vector<Signer> const& signersV,
         return true;
     }
 
+    verified =
+        verifyAll(signers[SIGNER_KEY_TYPE_ED25519_SIGNED_PAYLOAD],
+                  [&](DecoratedSignature const& sig, Signer const& signerKey) {
+                      return SignatureUtils::verifyEd25519SignedPayload(
+                          sig, signerKey.key);
+                  });
+    if (verified)
+    {
+        return true;
+    }
+
     return false;
 }
 
@@ -126,7 +142,7 @@ SignatureChecker::checkAllSignaturesUsed() const
     return true;
 #endif // FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 
-    if (mProtocolVersion == 7)
+    if (protocolVersionEquals(mProtocolVersion, ProtocolVersion::V_7))
     {
         return true;
     }

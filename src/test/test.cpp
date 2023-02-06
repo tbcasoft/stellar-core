@@ -2,6 +2,12 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "crypto/ShortHash.h"
+#include "util/Decoder.h"
+#include "util/GlobalChecks.h"
+#include <filesystem>
+#include <json/json.h>
+#include <sstream>
 #define CATCH_CONFIG_RUNNER
 
 #include "util/asio.h"
@@ -11,11 +17,13 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "main/Config.h"
 #include "main/StellarCoreVersion.h"
+#include "main/dumpxdr.h"
 #include "test.h"
 #include "test/TestUtils.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 #include "util/TmpDir.h"
+#include "util/XDRCereal.h"
 
 #include <cstdlib>
 #include <fmt/format.h>
@@ -51,19 +59,10 @@ struct ReseedPRNGListener : Catch::TestEventListenerBase
 {
     using TestEventListenerBase::TestEventListenerBase;
     static unsigned int sCommandLineSeed;
-    static void
-    reseed()
-    {
-        srand(sCommandLineSeed);
-        gRandomEngine.seed(sCommandLineSeed);
-        shortHash::seed(sCommandLineSeed);
-        Catch::rng().seed(sCommandLineSeed);
-        autocheck::rng().seed(sCommandLineSeed);
-    }
     virtual void
     testCaseStarting(Catch::TestCaseInfo const& testInfo) override
     {
-        reseed();
+        reinitializeAllGlobalStateWithSeed(sCommandLineSeed);
     }
 };
 
@@ -71,15 +70,123 @@ unsigned int ReseedPRNGListener::sCommandLineSeed = 0;
 
 CATCH_REGISTER_LISTENER(ReseedPRNGListener)
 
+// We also use a Catch event-listener to capture a global "current test context"
+// string that we can retrieve elsewhere (eg. in tx tests that record and
+// compare metadata).
+
+enum class TestTxMetaMode
+{
+    META_TEST_IGNORE,
+    META_TEST_RECORD,
+    META_TEST_CHECK
+};
+
+static TestTxMetaMode gTestTxMetaMode{TestTxMetaMode::META_TEST_IGNORE};
+
+struct TestContextListener : Catch::TestEventListenerBase
+{
+    using TestEventListenerBase::TestEventListenerBase;
+
+    static std::optional<Catch::TestCaseInfo> sTestCtx;
+    static std::vector<Catch::SectionInfo> sSectCtx;
+
+    void
+    testCaseStarting(Catch::TestCaseInfo const& testInfo) override
+    {
+        if (gTestTxMetaMode != TestTxMetaMode::META_TEST_IGNORE)
+        {
+            assertThreadIsMain();
+            releaseAssert(!sTestCtx.has_value());
+            sTestCtx.emplace(testInfo);
+        }
+    }
+    void
+    testCaseEnded(Catch::TestCaseStats const& testCaseStats) override
+    {
+        if (gTestTxMetaMode != TestTxMetaMode::META_TEST_IGNORE)
+        {
+            assertThreadIsMain();
+            releaseAssert(sTestCtx.has_value());
+            releaseAssert(sSectCtx.empty());
+            sTestCtx.reset();
+        }
+    }
+    void
+    sectionStarting(Catch::SectionInfo const& sectionInfo) override
+    {
+        if (gTestTxMetaMode != TestTxMetaMode::META_TEST_IGNORE)
+        {
+            assertThreadIsMain();
+            sSectCtx.emplace_back(sectionInfo);
+        }
+    }
+    void
+    sectionEnded(Catch::SectionStats const& sectionStats) override
+    {
+        if (gTestTxMetaMode != TestTxMetaMode::META_TEST_IGNORE)
+        {
+            assertThreadIsMain();
+            sSectCtx.pop_back();
+        }
+    }
+};
+
+CATCH_REGISTER_LISTENER(TestContextListener)
+
+namespace stdfs = std::filesystem;
+std::optional<Catch::TestCaseInfo> TestContextListener::sTestCtx;
+std::vector<Catch::SectionInfo> TestContextListener::sSectCtx;
+
+static std::map<stdfs::path,
+                std::map<std::string, std::pair<bool, std::vector<uint64_t>>>>
+    gTestTxMetadata;
+static std::optional<std::ofstream> gDebugTestTxMeta;
 static std::vector<std::string> gTestMetrics;
 static std::vector<std::unique_ptr<Config>> gTestCfg[Config::TESTDB_MODES];
 static std::vector<TmpDir> gTestRoots;
 static bool gTestAllVersions{false};
 static std::vector<uint32> gVersionsToTest;
 int gBaseInstance{0};
+static bool gMustUseTestVersionsWrapper{false};
+static uint32_t gTestingVersion{Config::CURRENT_LEDGER_PROTOCOL_VERSION};
+
+static void
+clearConfigs()
+{
+    for (auto& a : gTestCfg)
+    {
+        a.clear();
+    }
+}
+
+void
+test_versions_wrapper(std::function<void(void)> f)
+{
+    gMustUseTestVersionsWrapper = true;
+    for (auto v : gVersionsToTest)
+    {
+        clearConfigs();
+        gTestingVersion = v;
+        SECTION("protocol version " + std::to_string(v))
+        {
+            f();
+        }
+        clearConfigs();
+    }
+    gMustUseTestVersionsWrapper = false;
+    gTestingVersion = Config::CURRENT_LEDGER_PROTOCOL_VERSION;
+}
 
 bool force_sqlite = (std::getenv("STELLAR_FORCE_SQLITE") != nullptr);
 
+static void saveTestTxMeta(stdfs::path const& dir);
+static void loadTestTxMeta(stdfs::path const& dir);
+static void reportTestTxMeta();
+
+// if this method is used outside of the catch test cases, gTestRoots needs to
+// be manually cleared using cleanupTmpDirs. If this isn't done, gTestRoots will
+// try to use the logger when it is destructed, which is an issue because the
+// logger will have been destroyed.
 Config const&
 getTestConfig(int instanceNumber, Config::TestDbMode mode)
 {
@@ -115,6 +222,9 @@ getTestConfig(int instanceNumber, Config::TestDbMode mode)
         cfgs[instanceNumber] = std::make_unique<Config>();
         Config& thisConfig = *cfgs[instanceNumber];
         thisConfig.USE_CONFIG_FOR_GENESIS = true;
+        thisConfig.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION = gTestingVersion;
+        LOG_INFO(DEFAULT_LOG, "Making config for {}",
+                 thisConfig.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION);
 
         thisConfig.BUCKET_DIR_PATH = rootDir + "bucket";
 
@@ -188,9 +298,12 @@ getTestConfig(int instanceNumber, Config::TestDbMode mode)
         thisConfig.REPORT_METRICS = gTestMetrics;
         // disable maintenance
         thisConfig.AUTOMATIC_MAINTENANCE_COUNT = 0;
+        // disable self-check
+        thisConfig.AUTOMATIC_SELF_CHECK_PERIOD = std::chrono::seconds(0);
         // only spin up a small number of worker threads
         thisConfig.WORKER_THREADS = 2;
         thisConfig.QUORUM_INTERSECTION_CHECKER = false;
+        thisConfig.METADATA_DEBUG_LEDGERS = 0;
 #ifdef BEST_OFFER_DEBUGGING
         thisConfig.BEST_OFFER_DEBUGGING_ENABLED = true;
 #endif
@@ -210,6 +323,10 @@ runTest(CommandLineArgs const& args)
     // rotate the seed every 24 hours
     seed = static_cast<unsigned int>(std::time(nullptr)) / (24 * 3600);
 
+    std::string recordTestTxMeta;
+    std::string checkTestTxMeta;
+    std::string debugTestTxMeta;
+
     auto parser = session.cli();
     parser |= Catch::clara::Opt(
         [&](std::string const& arg) {
@@ -225,6 +342,16 @@ runTest(CommandLineArgs const& args)
     parser |= Catch::clara::Opt(gBaseInstance, "offset")["--base-instance"](
         "instance number offset so multiple instances of "
         "stellar-core can run tests concurrently");
+    parser |=
+        Catch::clara::Opt(recordTestTxMeta, "DIRNAME")["--record-test-tx-meta"](
+            "record baseline TxMeta from all tests");
+    parser |=
+        Catch::clara::Opt(checkTestTxMeta, "DIRNAME")["--check-test-tx-meta"](
+            "check TxMeta from all tests against recorded baseline");
+    parser |=
+        Catch::clara::Opt(debugTestTxMeta, "FILENAME")["--debug-test-tx-meta"](
+            "dump full TxMeta from all tests to FILENAME");
+
     session.cli(parser);
 
     auto result = session.cli().parse(
@@ -252,7 +379,39 @@ runTest(CommandLineArgs const& args)
     }
 
     ReseedPRNGListener::sCommandLineSeed = seed;
-    ReseedPRNGListener::reseed();
+    reinitializeAllGlobalStateWithSeed(seed);
+
+    if (gTestAllVersions)
+    {
+        gVersionsToTest.resize(Config::CURRENT_LEDGER_PROTOCOL_VERSION + 1);
+        std::iota(std::begin(gVersionsToTest), std::end(gVersionsToTest), 0);
+    }
+    else if (gVersionsToTest.empty())
+    {
+        gVersionsToTest.emplace_back(Config::CURRENT_LEDGER_PROTOCOL_VERSION);
+    }
+
+    if (!recordTestTxMeta.empty())
+    {
+        if (!checkTestTxMeta.empty())
+        {
+            LOG_ERROR(DEFAULT_LOG,
+                      "Options --record-test-tx-meta and --check-test-tx-meta "
+                      "are mutually exclusive");
+            return 1;
+        }
+        gTestTxMetaMode = TestTxMetaMode::META_TEST_RECORD;
+    }
+    if (!checkTestTxMeta.empty())
+    {
+        gTestTxMetaMode = TestTxMetaMode::META_TEST_CHECK;
+        loadTestTxMeta(checkTestTxMeta);
+    }
+    if (!debugTestTxMeta.empty())
+    {
+        gDebugTestTxMeta.emplace(debugTestTxMeta);
+        releaseAssert(gDebugTestTxMeta.value().good());
+    }
 
     // Note: Have to setLogLevel twice here to ensure --list-test-names-only is
     // not mixed with stellar-core logging.
@@ -268,26 +427,37 @@ runTest(CommandLineArgs const& args)
     LOG_INFO(DEFAULT_LOG, "Testing stellar-core {}", STELLAR_CORE_VERSION);
     LOG_INFO(DEFAULT_LOG, "Logging to {}", logFile);
 
-    if (gVersionsToTest.empty())
-    {
-        gVersionsToTest.emplace_back(Config::CURRENT_LEDGER_PROTOCOL_VERSION);
-    }
-
     auto r = session.run();
-    while (!gTestRoots.empty())
+    // In the 'list' modes Catch returns the number of tests listed. We don't
+    // want to treat this value as and error code.
+    if (session.configData().listTests ||
+        session.configData().listTestNamesOnly ||
+        session.configData().listTags || session.configData().listReporters)
     {
-        // Don't call gTestRoots.clear() here -- order of deletion is
-        // not actually specified by vector::clear, and varies between
-        // different C++ stdlibs, and we're (ulp) relying on destructor
-        // order to clean up tmpdirs sensibly. Instead: pop repeatedly.
-        gTestRoots.pop_back();
+        r = 0;
     }
-    gTestCfg->clear();
+    gTestRoots.clear();
+    clearConfigs();
+
     if (r != 0)
     {
         LOG_ERROR(DEFAULT_LOG, "Nonzero test result with --rng-seed {}", seed);
     }
+    if (gTestTxMetaMode == TestTxMetaMode::META_TEST_RECORD)
+    {
+        saveTestTxMeta(recordTestTxMeta);
+    }
+    else if (gTestTxMetaMode == TestTxMetaMode::META_TEST_CHECK)
+    {
+        reportTestTxMeta();
+    }
     return r;
+}
+
+void
+cleanupTmpDirs()
+{
+    gTestRoots.clear();
 }
 
 void
@@ -357,35 +527,17 @@ void
 for_versions(std::vector<uint32> const& versions, Application& app,
              std::function<void(void)> const& f)
 {
-    uint32_t previousVersion = 0;
-    {
-        LedgerTxn ltx(app.getLedgerTxnRoot());
-        previousVersion = ltx.loadHeader().current().ledgerVersion;
-    }
+    REQUIRE(gMustUseTestVersionsWrapper);
 
-    for (auto v : versions)
+    if (std::find(versions.begin(), versions.end(), gTestingVersion) !=
+        versions.end())
     {
-        if (!gTestAllVersions &&
-            std::find(gVersionsToTest.begin(), gVersionsToTest.end(), v) ==
-                gVersionsToTest.end())
         {
-            continue;
+            LedgerTxn ltx(app.getLedgerTxnRoot());
+            REQUIRE(ltx.loadHeader().current().ledgerVersion ==
+                    gTestingVersion);
         }
-        SECTION("protocol version " + std::to_string(v))
-        {
-            {
-                LedgerTxn ltx(app.getLedgerTxnRoot());
-                ltx.loadHeader().current().ledgerVersion = v;
-                ltx.commit();
-            }
-            f();
-        }
-    }
-
-    {
-        LedgerTxn ltx(app.getLedgerTxnRoot());
-        ltx.loadHeader().current().ledgerVersion = previousVersion;
-        ltx.commit();
+        f();
     }
 }
 
@@ -393,20 +545,15 @@ void
 for_versions(std::vector<uint32> const& versions, Config const& cfg,
              std::function<void(Config const&)> const& f)
 {
-    for (auto v : versions)
+    REQUIRE(gMustUseTestVersionsWrapper);
+
+    if (std::find(versions.begin(), versions.end(), gTestingVersion) !=
+        versions.end())
     {
-        if (!gTestAllVersions &&
-            std::find(gVersionsToTest.begin(), gVersionsToTest.end(), v) ==
-                gVersionsToTest.end())
-        {
-            continue;
-        }
-        SECTION("protocol version " + std::to_string(v))
-        {
-            Config vcfg = cfg;
-            vcfg.LEDGER_PROTOCOL_VERSION = v;
-            f(vcfg);
-        }
+        REQUIRE(cfg.TESTING_UPGRADE_LEDGER_PROTOCOL_VERSION == gTestingVersion);
+        Config vcfg = cfg;
+        vcfg.LEDGER_PROTOCOL_VERSION = gTestingVersion;
+        f(vcfg);
     }
 }
 
@@ -421,5 +568,291 @@ for_all_versions_except(std::vector<uint32> const& versions, Application& app,
         lastExcept = except;
     }
     for_versions_from(lastExcept + 1, app, f);
+}
+
+static void
+logFatalAndThrow(std::string const& msg)
+{
+    LOG_FATAL(DEFAULT_LOG, "{}", msg);
+    throw std::runtime_error(msg);
+}
+
+static std::pair<stdfs::path, std::string>
+getCurrentTestContext()
+{
+    assertThreadIsMain();
+
+    releaseAssert(TestContextListener::sTestCtx.has_value());
+    auto& tc = TestContextListener::sTestCtx.value();
+    stdfs::path file(tc.lineInfo.file);
+    file = file.filename().stem();
+
+    std::stringstream oss;
+    bool first = true;
+    for (auto const& sc : TestContextListener::sSectCtx)
+    {
+        if (!first)
+        {
+            oss << '|';
+        }
+        else
+        {
+            first = false;
+        }
+        oss << sc.name;
+    }
+
+    return std::make_pair(file, oss.str());
+}
+
+void
+recordOrCheckGlobalTestTxMetadata(TransactionMeta const& txMetaIn)
+{
+    if (gTestTxMetaMode == TestTxMetaMode::META_TEST_IGNORE)
+    {
+        return;
+    }
+    TransactionMeta txMeta = txMetaIn;
+    normalizeMeta(txMeta);
+    auto ctx = getCurrentTestContext();
+    if (gDebugTestTxMeta.has_value())
+    {
+        gDebugTestTxMeta.value()
+            << "=== " << ctx.first << " : " << ctx.second << " ===" << std::endl
+            << xdr_to_string(txMeta, "TransactionMeta", false) << std::endl;
+    }
+    uint64_t gotTxMetaHash = shortHash::xdrComputeHash(txMeta);
+    if (gTestTxMetaMode == TestTxMetaMode::META_TEST_RECORD)
+    {
+        auto& pair = gTestTxMetadata[ctx.first][ctx.second];
+        auto& testRan = pair.first;
+        auto& testHashes = pair.second;
+        testRan = false;
+        testHashes.emplace_back(gotTxMetaHash);
+    }
+    else
+    {
+        releaseAssert(gTestTxMetaMode == TestTxMetaMode::META_TEST_CHECK);
+        auto i = gTestTxMetadata.find(ctx.first);
+        CHECK(i != gTestTxMetadata.end());
+        if (i == gTestTxMetadata.end())
+        {
+            return;
+        }
+        auto j = i->second.find(ctx.second);
+        CHECK(j != i->second.end());
+        if (j == i->second.end())
+        {
+            return;
+        }
+        bool& testRan = j->second.first;
+        testRan = true;
+        std::vector<uint64_t>& vec = j->second.second;
+        CHECK(!vec.empty());
+        if (vec.empty())
+        {
+            return;
+        }
+        uint64_t& expectedTxMetaHash = vec.back();
+        CHECK(expectedTxMetaHash == gotTxMetaHash);
+        vec.pop_back();
+    }
+}
+
+static char const* TESTKEY_PROTOCOL_VERSION = "!cfg protocol version";
+static char const* TESTKEY_RNG_SEED = "!rng seed";
+static char const* TESTKEY_ALL_VERSIONS = "!test all versions";
+static char const* TESTKEY_VERSIONS_TO_TEST = "!versions to test";
+
+template <typename T>
+void
+checkTestKeyVal(std::string const& k, T const& expected, T const& got,
+                stdfs::path const& path)
+{
+    if (expected != got)
+    {
+        throw std::runtime_error(fmt::format("Expected '{}' = {}, got {} in {}",
+                                             k, expected, got, path));
+    }
+}
+
+template <typename T>
+void
+checkTestKeyVals(std::string const& k, T const& expected, T const& got,
+                 stdfs::path const& path)
+{
+    if (expected != got)
+    {
+        throw std::runtime_error(fmt::format("Expected '{}' = {}, got {} in {}",
+                                             k, fmt::join(expected, ", "),
+                                             fmt::join(got, ", "), path));
+    }
+}
+
+static void
+loadTestTxMeta(stdfs::path const& dir)
+{
+    if (!stdfs::is_directory(dir))
+    {
+        logFatalAndThrow(fmt::format("{} is not a directory", dir));
+    }
+    size_t n = 0;
+    for (auto const& dirent : stdfs::directory_iterator{dir})
+    {
+        auto path = dirent.path();
+        if (path.extension() != ".json")
+        {
+            continue;
+        }
+        std::ifstream in(path);
+        if (!in)
+        {
+            logFatalAndThrow(fmt::format("Failed to open {}", path));
+        }
+        in.exceptions(std::ios::failbit | std::ios::badbit);
+        Json::Value root;
+        in >> root;
+        auto basename = path.filename().stem();
+        auto& fileTestCases = gTestTxMetadata[basename];
+        for (auto entry = root.begin(); entry != root.end(); ++entry)
+        {
+            std::string name = entry.key().asString();
+            if (!name.empty() && name.at(0) == '!')
+            {
+                if (name == TESTKEY_PROTOCOL_VERSION)
+                {
+                    checkTestKeyVal(name,
+                                    Config::CURRENT_LEDGER_PROTOCOL_VERSION,
+                                    entry->asUInt(), path);
+                }
+                else if (name == TESTKEY_RNG_SEED)
+                {
+                    checkTestKeyVal(name, ReseedPRNGListener::sCommandLineSeed,
+                                    entry->asUInt(), path);
+                }
+                else if (name == TESTKEY_ALL_VERSIONS)
+                {
+                    checkTestKeyVal(name, gTestAllVersions, entry->asBool(),
+                                    path);
+                }
+                else if (name == TESTKEY_VERSIONS_TO_TEST)
+                {
+                    std::vector<uint32> versions;
+                    for (auto v : *entry)
+                    {
+                        versions.emplace_back(v.asUInt());
+                    }
+                    checkTestKeyVals(name, gVersionsToTest, versions, path);
+                }
+                continue;
+            }
+            std::vector<uint64_t> hashes;
+            for (auto const& h : *entry)
+            {
+                ++n;
+                // To keep the baseline files small, we store each
+                // 64-bit SIPHash as a base64 encoded string.
+                std::vector<uint8_t> buf;
+                decoder::decode_b64(h.asString(), buf);
+                uint64_t tmp = 0;
+                for (size_t i = 0; i < sizeof(uint64_t); ++i)
+                {
+                    tmp <<= 8;
+                    tmp |= buf.at(i);
+                }
+                hashes.emplace_back(tmp);
+            }
+            std::reverse(hashes.begin(), hashes.end());
+            auto pair =
+                fileTestCases.emplace(name, std::make_pair(false, hashes));
+            if (!pair.second)
+            {
+                logFatalAndThrow(
+                    fmt::format("Duplicate test TxMeta found for key: {}:{}",
+                                basename, name));
+            }
+        }
+    }
+    LOG_INFO(DEFAULT_LOG, "Loaded {} TxMetas to check during replay", n);
+}
+
+static void
+saveTestTxMeta(stdfs::path const& dir)
+{
+    for (auto const& filePair : gTestTxMetadata)
+    {
+        Json::Value fileRoot;
+        fileRoot[TESTKEY_PROTOCOL_VERSION] =
+            Config::CURRENT_LEDGER_PROTOCOL_VERSION;
+        fileRoot[TESTKEY_RNG_SEED] = ReseedPRNGListener::sCommandLineSeed;
+        fileRoot[TESTKEY_ALL_VERSIONS] = gTestAllVersions;
+        {
+            Json::Value versions;
+            for (auto v : gVersionsToTest)
+            {
+                versions.append(v);
+            }
+            fileRoot[TESTKEY_VERSIONS_TO_TEST] = versions;
+        }
+        for (auto const& testCasePair : filePair.second)
+        {
+            Json::Value& hashes = fileRoot[testCasePair.first];
+            for (auto const& h : testCasePair.second.second)
+            {
+                uint64_t tmp = h;
+                std::vector<uint8_t> buf;
+                for (size_t i = sizeof(uint64_t); i > 0; --i)
+                {
+                    buf.emplace_back(uint8_t(0xff & (tmp >> (8 * (i - 1)))));
+                }
+                hashes.append(decoder::encode_b64(buf));
+            }
+        }
+        stdfs::path path = dir / filePair.first;
+        path.replace_extension(".json");
+        std::ofstream out(path, std::ios_base::trunc);
+        if (!out)
+        {
+            logFatalAndThrow(fmt::format("Failed to open {}", path));
+        }
+        out.exceptions(std::ios::failbit | std::ios::badbit);
+        out << fileRoot;
+    }
+}
+
+static void
+reportTestTxMeta()
+{
+    size_t contexts = 0, nonempty = 0, hashes = 0;
+    for (auto const& filePair : gTestTxMetadata)
+    {
+        for (auto const& testCasePair : filePair.second)
+        {
+            ++contexts;
+            auto const& testRan = testCasePair.second.first;
+            auto const& testHashes = testCasePair.second.second;
+            if (testRan && !testHashes.empty())
+            {
+                LOG_FATAL(DEFAULT_LOG,
+                          "Tests did not check {} TxMeta hashes in test "
+                          "context '{}' in file '{}'",
+                          testHashes.size(), testCasePair.first,
+                          filePair.first);
+                ++nonempty;
+                hashes += testHashes.size();
+            }
+        }
+    }
+    if (nonempty == 0)
+    {
+        LOG_INFO(DEFAULT_LOG,
+                 "Checked all expected TxMeta for {} test contexts.", contexts);
+    }
+    else
+    {
+        logFatalAndThrow(fmt::format(
+            "Found {} un-checked TxMeta hashes in {} of {} test contexts.",
+            hashes, nonempty, contexts));
+    }
 }
 }

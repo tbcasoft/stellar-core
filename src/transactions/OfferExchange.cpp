@@ -3,17 +3,26 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "OfferExchange.h"
+#include "crypto/SHA.h"
 #include "database/Database.h"
 #include "ledger/LedgerManager.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/TrustLineWrapper.h"
-#include "lib/util/uint128_t.h"
 #include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
+#include "util/numeric128.h"
 #include <Tracy.hpp>
+
+struct ExchangedQuantities
+{
+    int64_t sheepSend{0};
+    int64_t wheatReceived{0};
+};
 
 namespace stellar
 {
@@ -130,7 +139,7 @@ exchangeV2(int64_t wheatReceived, Price price, int64_t maxWheatReceive,
     result.numSheepSend = std::min(result.numSheepSend, maxSheepSend);
     // bias towards seller (this cannot overflow at this point)
     result.numWheatReceived =
-        bigDivide(result.numSheepSend, price.d, price.n, ROUND_DOWN);
+        bigDivideOrThrow(result.numSheepSend, price.d, price.n, ROUND_DOWN);
 
     return result;
 }
@@ -569,7 +578,7 @@ exchangeV10(Price price, int64_t maxWheatSend, int64_t maxWheatReceive,
 // Similarly, we investigate when (!wheatStays && price.n <= price.d). Then it
 // follows from sheepSend = 0 that
 //     wheatReceive = ceil(sheepSend * price.d / price.n)
-// so wheatReceive = 0. Similary, if wheatReceive = 0 then
+// so wheatReceive = 0. Similarly, if wheatReceive = 0 then
 //     wheatReceive = ceil(sheepSend * price.d / price.n)
 //                  >= ceil(sheepSend)
 //                  = sheepSend
@@ -638,32 +647,36 @@ exchangeV10WithoutPriceErrorThresholds(Price price, int64_t maxWheatSend,
     {
         if (round == RoundingType::PATH_PAYMENT_STRICT_SEND)
         {
-            wheatReceive = bigDivide(sheepValue, price.n, ROUND_DOWN);
+            wheatReceive = bigDivideOrThrow128(sheepValue, price.n, ROUND_DOWN);
             sheepSend = std::min({maxSheepSend, maxSheepReceive});
         }
         else if (price.n > price.d || // Wheat is more valuable
                  round == RoundingType::PATH_PAYMENT_STRICT_RECEIVE)
         {
-            wheatReceive = bigDivide(sheepValue, price.n, ROUND_DOWN);
-            sheepSend = bigDivide(wheatReceive, price.n, price.d, ROUND_UP);
+            wheatReceive = bigDivideOrThrow128(sheepValue, price.n, ROUND_DOWN);
+            sheepSend =
+                bigDivideOrThrow(wheatReceive, price.n, price.d, ROUND_UP);
         }
         else // Sheep is more valuable
         {
-            sheepSend = bigDivide(sheepValue, price.d, ROUND_DOWN);
-            wheatReceive = bigDivide(sheepSend, price.d, price.n, ROUND_DOWN);
+            sheepSend = bigDivideOrThrow128(sheepValue, price.d, ROUND_DOWN);
+            wheatReceive =
+                bigDivideOrThrow(sheepSend, price.d, price.n, ROUND_DOWN);
         }
     }
     else
     {
         if (price.n > price.d) // Wheat is more valuable
         {
-            wheatReceive = bigDivide(wheatValue, price.n, ROUND_DOWN);
-            sheepSend = bigDivide(wheatReceive, price.n, price.d, ROUND_DOWN);
+            wheatReceive = bigDivideOrThrow128(wheatValue, price.n, ROUND_DOWN);
+            sheepSend =
+                bigDivideOrThrow(wheatReceive, price.n, price.d, ROUND_DOWN);
         }
         else // Sheep is more valuable
         {
-            sheepSend = bigDivide(wheatValue, price.d, ROUND_DOWN);
-            wheatReceive = bigDivide(sheepSend, price.d, price.n, ROUND_UP);
+            sheepSend = bigDivideOrThrow128(wheatValue, price.d, ROUND_DOWN);
+            wheatReceive =
+                bigDivideOrThrow(sheepSend, price.d, price.n, ROUND_UP);
         }
     }
 
@@ -822,7 +835,7 @@ adjustOffer(LedgerTxnHeader const& header, LedgerTxnEntry& offer,
 //         = floor(maxSheepReceive * price.d / price.n) * price.n
 //         <= (maxSheepReceive * price.d / price.n) * price.n
 //         = maxSheepReceive * price.d
-// which combined with the defition of wheatValue yields
+// which combined with the definition of wheatValue yields
 //     wheatValue' = maxWheatSend' * price.n
 // From this we find that
 //     wheatReceive' = floor(wheatValue' / price.n)
@@ -933,14 +946,16 @@ performExchange(LedgerTxnHeader const& header,
         {canSellAtMostBasedOnSheep(header, sheep, sheepLineAccountB, price),
          canSellAtMost(header, accountB, wheat, wheatLineAccountB),
          offer.amount});
-    assert(numWheatReceived >= 0);
+    releaseAssertOrThrow(numWheatReceived >= 0);
 
     newAmount = numWheatReceived;
-    auto exchangeResult = header.current().ledgerVersion < 3
-                              ? exchangeV2(numWheatReceived, price,
-                                           maxWheatReceived, maxSheepSend)
-                              : exchangeV3(numWheatReceived, price,
-                                           maxWheatReceived, maxSheepSend);
+    auto exchangeResult =
+        protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_3)
+            ? exchangeV2(numWheatReceived, price, maxWheatReceived,
+                         maxSheepSend)
+            : exchangeV3(numWheatReceived, price, maxWheatReceived,
+                         maxSheepSend);
 
     numWheatReceived = exchangeResult.numWheatReceived;
     numSheepSend = exchangeResult.numSheepSend;
@@ -969,11 +984,11 @@ static CrossOfferResult
 crossOffer(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
            int64_t maxWheatReceived, int64_t& numWheatReceived,
            int64_t maxSheepSend, int64_t& numSheepSend,
-           std::vector<ClaimOfferAtom>& offerTrail)
+           std::vector<ClaimAtom>& offerTrail)
 {
     ZoneScoped;
-    assert(maxWheatReceived > 0);
-    assert(maxSheepSend > 0);
+    releaseAssertOrThrow(maxWheatReceived > 0);
+    releaseAssertOrThrow(maxSheepSend > 0);
 
     auto& offer = sellingWheatOffer.current().data.offer();
     // Note: These must be copies not references, since they are used even
@@ -1077,8 +1092,10 @@ crossOffer(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
         ltxInner.commit();
     }
 
-    offerTrail.push_back(ClaimOfferAtom(accountBID, offerID, wheat,
-                                        numWheatReceived, sheep, numSheepSend));
+    // Always returns a CLAIM_ATOM_TYPE_V0 in this case
+    offerTrail.emplace_back(
+        makeClaimAtom(ltx.loadHeader().current().ledgerVersion, accountBID,
+                      offerID, wheat, numWheatReceived, sheep, numSheepSend));
     return (newAmount == 0) ? CrossOfferResult::eOfferTaken
                             : CrossOfferResult::eOfferPartial;
 }
@@ -1087,11 +1104,11 @@ static CrossOfferResult
 crossOfferV10(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
               int64_t maxWheatReceived, int64_t& numWheatReceived,
               int64_t maxSheepSend, int64_t& numSheepSend, bool& wheatStays,
-              RoundingType round, std::vector<ClaimOfferAtom>& offerTrail)
+              RoundingType round, std::vector<ClaimAtom>& offerTrail)
 {
     ZoneScoped;
-    assert(maxWheatReceived > 0);
-    assert(maxSheepSend > 0);
+    releaseAssertOrThrow(maxWheatReceived > 0);
+    releaseAssertOrThrow(maxSheepSend > 0);
     auto header = ltx.loadHeader();
 
     auto& offer = sellingWheatOffer.current().data.offer();
@@ -1210,18 +1227,265 @@ crossOfferV10(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
     // deactivated at this point. Specifically, you cannot use sellingWheatOffer
     // or offer (which is a reference) since it is not active (and may have been
     // erased) at this point.
-    offerTrail.push_back(ClaimOfferAtom(accountBID, offerID, wheat,
-                                        numWheatReceived, sheep, numSheepSend));
+    offerTrail.emplace_back(
+        makeClaimAtom(ltx.loadHeader().current().ledgerVersion, accountBID,
+                      offerID, wheat, numWheatReceived, sheep, numSheepSend));
     return res;
 }
 
-ConvertResult
+// Variables suffixed with "ToPool" are associated with the asset that will be
+// sent to the pool, and variables suffixed with "FromPool" are associated with
+// the asset that will be received from the pool. Compared to the interface of
+// exchangeV10, "ToPool" is analogous to "sheep" and "FromPool" is analogous to
+// "wheat".
+bool
+exchangeWithPool(int64_t reservesToPool, int64_t maxSendToPool, int64_t& toPool,
+                 int64_t reservesFromPool, int64_t maxReceiveFromPool,
+                 int64_t& fromPool, int32_t feeBps, RoundingType round)
+{
+    ZoneScoped;
+
+    int32_t const maxBps = 10000;
+    if (feeBps < 0 || maxBps <= feeBps)
+    {
+        throw std::runtime_error("Liquidity pool fee out of range");
+    }
+
+    if (reservesToPool <= 0 || reservesFromPool <= 0)
+    {
+        // This should never happen, but the following code makes positivity
+        // assumptions about these values.
+        throw std::runtime_error("non-positive reserve in exchangeWithPool");
+    }
+
+    switch (round)
+    {
+    case RoundingType::PATH_PAYMENT_STRICT_SEND:
+    {
+        // PathPaymentStrictSend always allows INT64_MAX to be received at
+        // every hop, and exchange with a pool always happens as a unit
+        // (compare against the order book where multiple offers might execute
+        // in a hop).
+        if (maxReceiveFromPool != INT64_MAX)
+        {
+            throw std::runtime_error("strict send with bounded receive?");
+        }
+        // We can't receive more from the pool then it has reserves.
+        maxReceiveFromPool = reservesFromPool;
+
+        // We have to send this amount exactly, and we can't do it if that would
+        // overflow reserves.
+        if (maxSendToPool > INT64_MAX - reservesToPool)
+        {
+            return false;
+        }
+        toPool = maxSendToPool;
+
+        // This can't overflow:
+        // - 0 <  reservesToPool <= INT64_MAX
+        // - 0 <= toPool <= INT64_MAX
+        // - 0 <  maxBps - feeBps <= maxBps <= 10000
+        //
+        // from which it follows that
+        //
+        // denominator
+        //  = maxBps * reservesToPool + (maxBps - feeBps) * toPool
+        // <= 10000 * INT64_MAX + 10000 * INT64_MAX
+        // <  UINT128_MAX
+        uint128_t denominator = bigMultiply(maxBps, reservesToPool) +
+                                bigMultiply(maxBps - feeBps, toPool);
+
+        bool res = hugeDivide(fromPool, maxBps - feeBps,
+                              bigMultiply(reservesFromPool, toPool),
+                              denominator, ROUND_DOWN);
+
+        // To be defensive, we need a bound on fromPool. First, note that
+        //
+        // denominator
+        //  = maxBps * reservesToPool + (maxBps - feeBps) * toPool
+        // >= (maxBps - feeBps) * toPool
+        //
+        // Using this result, we can evaluate
+        //
+        // fromPool
+        //  = floor[(maxBps - feeBps) * reservesFromPool * toPool / denominator]
+        // <= (maxBps - feeBps) * reservesFromPool * toPool / denominator
+        // <= reservesFromPool
+        if (res && fromPool > maxReceiveFromPool)
+        {
+            // This should never happen, see the above proof.
+            throw std::runtime_error("received too much from pool");
+        }
+        if (res && fromPool < 0)
+        {
+            // This should never happen
+            throw std::runtime_error("fromPool is negative");
+        }
+
+        // Fail if the division overflows, or if we are receiving 0. It is
+        // possible to receive 0 due to the ROUND_DOWN.
+        return res && fromPool != 0;
+    }
+    case RoundingType::PATH_PAYMENT_STRICT_RECEIVE:
+    {
+        // PathPaymentStrictReceive always allows INT64_MAX to be sent at every
+        // hop, and exchange with a pool always happens as a unit (compare
+        // against the order book where multiple offers might execute in a hop).
+        if (maxSendToPool != INT64_MAX)
+        {
+            throw std::runtime_error("strict receive with bounded send?");
+        }
+        // We can't send more to the pool then it has space for additional
+        // reserves.
+        maxSendToPool = INT64_MAX - reservesToPool;
+
+        // We have to receive this amount exactly, and we can't do it if that
+        // would deplete reserves entirely.
+        if (maxReceiveFromPool >= reservesFromPool)
+        {
+            return false;
+        }
+        fromPool = maxReceiveFromPool;
+
+        bool res = hugeDivide(
+            toPool, maxBps, bigMultiply(reservesToPool, fromPool),
+            bigMultiply(reservesFromPool - fromPool, maxBps - feeBps),
+            ROUND_UP);
+
+        if (res && toPool < 0)
+        {
+            // This should never happen
+            throw std::runtime_error("toPool is negative");
+        }
+
+        // Fail if the division overflows, or if we would be sending too much to
+        // the pool.
+        return res && toPool <= maxSendToPool;
+    }
+    default:
+        throw std::runtime_error("Invalid rounding type");
+    }
+}
+
+PoolID
+getPoolID(Asset const& x, Asset const& y, int32_t feeBps)
+{
+    LiquidityPoolParameters lpp(LIQUIDITY_POOL_CONSTANT_PRODUCT);
+    auto& cp = lpp.constantProduct();
+    cp.assetA = std::min(x, y);
+    cp.assetB = std::max(x, y);
+    cp.fee = feeBps;
+    return xdrSha256(lpp);
+}
+
+static bool
+exchangeWithPool(AbstractLedgerTxn& ltxOuter, Asset const& toPoolAsset,
+                 int64_t maxSendToPool, int64_t& toPool,
+                 Asset const& fromPoolAsset, int64_t maxReceiveFromPool,
+                 int64_t& fromPool, RoundingType round,
+                 int64_t maxOffersToCross)
+{
+    LedgerTxn ltx(ltxOuter);
+
+    if (protocolVersionIsBefore(ltx.loadHeader().current().ledgerVersion,
+                                ProtocolVersion::V_18))
+    {
+        // Only exchange with pools starting at protocol version 18
+        return false;
+    }
+    if (isPoolTradingDisabled(ltx.loadHeader().current()))
+    {
+        return false;
+    }
+    if (round == RoundingType::NORMAL)
+    {
+        // Only exchange with pools for path payments
+        return false;
+    }
+    if (maxOffersToCross == 0)
+    {
+        // offerTrail is going to be too long after exchanging with the
+        // liquidity pool
+        // note that this condition can only happen in path payment when
+        // performing subsequent hops
+        return false;
+    }
+
+    int32_t const feeBps = LIQUIDITY_POOL_FEE_V18;
+    auto poolID = getPoolID(toPoolAsset, fromPoolAsset, feeBps);
+    auto lp = loadLiquidityPool(ltx, poolID);
+    if (!lp)
+    {
+        return false;
+    }
+
+    auto cp = [&lp]() -> auto&
+    {
+        return lp.current().data.liquidityPool().body.constantProduct();
+    };
+
+    if (cp().reserveA <= 0 || cp().reserveB <= 0)
+    {
+        // It is possible to have reserveA = reserveB = 0, specifically when a
+        // pool share trust line exists but no deposits have been made. It
+        // should not be possible to have either
+        //      reserveA = 0 && reserveB != 0
+        //      reserveA < 0 || reserveB < 0
+        // but for safety we disallow trading with the pool in those cases.
+        return false;
+    }
+
+    bool res = false;
+    if (toPoolAsset == cp().params.assetA &&
+        fromPoolAsset == cp().params.assetB)
+    {
+        res = exchangeWithPool(cp().reserveA, maxSendToPool, toPool,
+                               cp().reserveB, maxReceiveFromPool, fromPool,
+                               feeBps, round);
+        if (res)
+        {
+            if (!addBalance(cp().reserveA, toPool) ||
+                !addBalance(cp().reserveB, -fromPool))
+            {
+                throw std::runtime_error("could not update reserves");
+            }
+        }
+    }
+    else if (fromPoolAsset == cp().params.assetA &&
+             toPoolAsset == cp().params.assetB)
+    {
+        res = exchangeWithPool(cp().reserveB, maxSendToPool, toPool,
+                               cp().reserveA, maxReceiveFromPool, fromPool,
+                               feeBps, round);
+        if (res)
+        {
+            if (!addBalance(cp().reserveA, -fromPool) ||
+                !addBalance(cp().reserveB, toPool))
+            {
+                throw std::runtime_error("could not update reserves");
+            }
+        }
+    }
+    else
+    {
+        // We should never get here
+        throw std::runtime_error("Invalid liquidity pool assets");
+    }
+
+    if (res)
+    {
+        ltx.commit();
+    }
+    return res;
+}
+
+static ConvertResult
 convertWithOffers(
     AbstractLedgerTxn& ltxOuter, Asset const& sheep, int64_t maxSheepSend,
     int64_t& sheepSend, Asset const& wheat, int64_t maxWheatReceive,
     int64_t& wheatReceived, RoundingType round,
     std::function<OfferFilterResult(LedgerTxnEntry const&)> filter,
-    std::vector<ClaimOfferAtom>& offerTrail, int64_t maxOffersToCross)
+    std::vector<ClaimAtom>& offerTrail, int64_t maxOffersToCross)
 {
     ZoneScoped;
     std::string pairStr = assetToString(sheep);
@@ -1231,12 +1495,22 @@ convertWithOffers(
 
     // If offerTrail is not empty at the start, then the limit maxOffersToCross
     // will not be imposed correctly.
-    assert(offerTrail.empty());
+    releaseAssertOrThrow(offerTrail.empty());
 
     sheepSend = 0;
     wheatReceived = 0;
 
     bool needMore = (maxWheatReceive > 0 && maxSheepSend > 0);
+    if (needMore && maxOffersToCross == 0 &&
+        protocolVersionStartsFrom(ltxOuter.loadHeader().current().ledgerVersion,
+                                  ProtocolVersion::V_18))
+    {
+        // offerTrail is going to be too long, fast fail
+        // note that this condition can only happen in path payment when
+        // performing subsequent hops
+        return ConvertResult::eCrossedTooMany;
+    }
+
     while (needMore)
     {
         LedgerTxn ltx(ltxOuter);
@@ -1245,9 +1519,34 @@ convertWithOffers(
         {
             break;
         }
-        if (filter && filter(wheatOffer) == OfferFilterResult::eStop)
+
+        // Special behavior for offer 289733046 can only happen in protocol 15
+        if (gIsProductionNetwork &&
+            ltx.loadHeader().current().ledgerSeq == 34793621 &&
+            wheatOffer.current().data.offer().offerID == 289733046)
         {
-            return ConvertResult::eFilterStop;
+            auto const sponsorStrKey = "GAS3CQSW3HE27IF5KDWKCM7K6FG6AHR"
+                                       "HWOUVBUWIRV4ZGTJMPBXNGATF";
+            auto const sponsorID =
+                KeyUtils::fromStrKey<PublicKey>(sponsorStrKey);
+
+            wheatOffer.current().ext.v(1);
+            wheatOffer.current().ext.v1().sponsoringID.activate() = sponsorID;
+        }
+
+        if (filter)
+        {
+            switch (filter(wheatOffer))
+            {
+            case OfferFilterResult::eKeep:
+                break;
+            case OfferFilterResult::eStopBadPrice:
+                return ConvertResult::eFilterStopBadPrice;
+            case OfferFilterResult::eStopCrossSelf:
+                return ConvertResult::eFilterStopCrossSelf;
+            default:
+                throw std::runtime_error("unexpected filter result");
+            }
         }
 
         // Note: maxOffersToCross == INT64_MAX before protocol version 11
@@ -1259,7 +1558,8 @@ convertWithOffers(
         int64_t numWheatReceived;
         int64_t numSheepSend;
         CrossOfferResult cor;
-        if (ltx.loadHeader().current().ledgerVersion >= 10)
+        if (protocolVersionStartsFrom(ltx.loadHeader().current().ledgerVersion,
+                                      ProtocolVersion::V_10))
         {
             bool wheatStays;
             cor = crossOfferV10(ltx, wheatOffer, maxWheatReceive,
@@ -1274,10 +1574,10 @@ convertWithOffers(
             needMore = true;
         }
 
-        assert(numSheepSend >= 0);
-        assert(numSheepSend <= maxSheepSend);
-        assert(numWheatReceived >= 0);
-        assert(numWheatReceived <= maxWheatReceive);
+        releaseAssertOrThrow(numSheepSend >= 0);
+        releaseAssertOrThrow(numSheepSend <= maxSheepSend);
+        releaseAssertOrThrow(numWheatReceived >= 0);
+        releaseAssertOrThrow(numWheatReceived <= maxWheatReceive);
 
         if (cor == CrossOfferResult::eOfferCantConvert)
         {
@@ -1301,7 +1601,9 @@ convertWithOffers(
             return ConvertResult::ePartial;
         }
     }
-    if ((ltxOuter.loadHeader().current().ledgerVersion < 10) || !needMore)
+    if (protocolVersionIsBefore(ltxOuter.loadHeader().current().ledgerVersion,
+                                ProtocolVersion::V_10) ||
+        !needMore)
     {
         return ConvertResult::eOK;
     }
@@ -1309,5 +1611,132 @@ convertWithOffers(
     {
         return ConvertResult::ePartial;
     }
+}
+
+static bool
+shouldConvertWithOffers(std::optional<ExchangedQuantities> const& poolExchange,
+                        ExchangedQuantities const& bookExchange,
+                        ConvertResult convertRes)
+{
+    if (poolExchange)
+    {
+        // If we can do the exchange with the pool but not with the order book
+        // then use the pool
+        if (convertRes != ConvertResult::eOK)
+        {
+            return false;
+        }
+
+        // pE.sS * bE.wR > pE.wR * bE.sS is equivalent in arbitrary precision to
+        // bE.wR / bE.sS > pe.wR / pE.sS, but the first form avoids rounding in
+        // finite precision
+        //
+        // We want to use the liquidity pool unless the order book provides a
+        // strictly better price
+        return bigMultiply(poolExchange->sheepSend,
+                           bookExchange.wheatReceived) >
+               bigMultiply(poolExchange->wheatReceived, bookExchange.sheepSend);
+    }
+
+    // If we can't exchange with the pool then either
+    // - the exchange with the book succeeded so we should use that
+    // - the exchange with the book failed so we should return that error code
+    //   for compatibility with old behavior
+    return true;
+}
+
+// returns true if converting with offers, false otherwise
+static bool
+maybeConvertWithOffers(
+    AbstractLedgerTxn& ltxOuter, Asset const& sheep, int64_t maxSheepSend,
+    int64_t& sheepSend, Asset const& wheat, int64_t maxWheatReceive,
+    int64_t& wheatReceived, RoundingType round,
+    std::function<OfferFilterResult(LedgerTxnEntry const&)> filter,
+    std::vector<ClaimAtom>& offerTrail, int64_t maxOffersToCross,
+    ConvertResult& convertRes)
+{
+    // Compute the exchange from the liquidity pool but don't actually do the
+    // exchange
+    std::optional<ExchangedQuantities> poolExchange;
+    {
+        LedgerTxn ltxExchangeWithPool(ltxOuter); // Always rolls back
+        ExchangedQuantities res;
+        if (exchangeWithPool(ltxExchangeWithPool, sheep, maxSheepSend,
+                             res.sheepSend, wheat, maxWheatReceive,
+                             res.wheatReceived, round, maxOffersToCross))
+        {
+            poolExchange = std::make_optional<ExchangedQuantities>(res);
+        }
+    }
+
+    // Maybe use the order book
+    {
+        LedgerTxn ltxConvertWithOffers(ltxOuter);
+
+        std::vector<ClaimAtom> tempOfferTrail;
+        ExchangedQuantities bookExchange;
+        auto res = convertWithOffers(
+            ltxConvertWithOffers, sheep, maxSheepSend, bookExchange.sheepSend,
+            wheat, maxWheatReceive, bookExchange.wheatReceived, round, filter,
+            tempOfferTrail, maxOffersToCross);
+
+        if (shouldConvertWithOffers(poolExchange, bookExchange, res))
+        {
+            convertRes = res;
+            sheepSend = bookExchange.sheepSend;
+            wheatReceived = bookExchange.wheatReceived;
+            offerTrail = std::move(tempOfferTrail);
+            ltxConvertWithOffers.commit();
+            return true;
+        }
+    }
+
+    return false;
+}
+
+ConvertResult
+convertWithOffersAndPools(
+    AbstractLedgerTxn& ltxOuter, Asset const& sheep, int64_t maxSheepSend,
+    int64_t& sheepSend, Asset const& wheat, int64_t maxWheatReceive,
+    int64_t& wheatReceived, RoundingType round,
+    std::function<OfferFilterResult(LedgerTxnEntry const&)> filter,
+    std::vector<ClaimAtom>& offerTrail, int64_t maxOffersToCross)
+{
+    ZoneScoped;
+
+    // If offerTrail is not empty at the start, then the limit maxOffersToCross
+    // will not be imposed correctly.
+    releaseAssertOrThrow(offerTrail.empty());
+
+    sheepSend = 0;
+    wheatReceived = 0;
+
+    {
+        ConvertResult convertRes;
+        if (maybeConvertWithOffers(ltxOuter, sheep, maxSheepSend, sheepSend,
+                                   wheat, maxWheatReceive, wheatReceived, round,
+                                   filter, offerTrail, maxOffersToCross,
+                                   convertRes))
+        {
+            return convertRes;
+        }
+    }
+
+    // Ensure that there were no side effects from maybeConvertWithOffers (this
+    // should be a no-op)
+    offerTrail.clear();
+    sheepSend = 0;
+    wheatReceived = 0;
+
+    // Compute the exchange from the liquidity pool and actually do the exchange
+    exchangeWithPool(ltxOuter, sheep, maxSheepSend, sheepSend, wheat,
+                     maxWheatReceive, wheatReceived, round, maxOffersToCross);
+
+    ClaimAtom atom(CLAIM_ATOM_TYPE_LIQUIDITY_POOL);
+    atom.liquidityPool() =
+        ClaimLiquidityAtom(getPoolID(sheep, wheat, LIQUIDITY_POOL_FEE_V18),
+                           wheat, wheatReceived, sheep, sheepSend);
+    offerTrail.emplace_back(atom);
+    return ConvertResult::eOK;
 }
 }

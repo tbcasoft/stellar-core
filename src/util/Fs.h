@@ -6,6 +6,7 @@
 
 #include "util/asio.h"
 
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <string>
@@ -46,17 +47,11 @@ void unlockFile(std::string const& path);
 // Call fsync() on POSIX or FlushFileBuffers() on Win32.
 void flushFileChanges(native_handle_t h);
 
-// For completely preposterous reasons, on windows an asio "stream"
-// type wrapping a win32 HANDLE is always written-to using an OVERLAPPED
-// structure with offset zero, meaning that when you write to a
-// file-on-the-disk HANDLE as though it is a stream, you wind up writing all
-// data at offset 0, over and over. Instead -- at least on windows and when
-// dealing with a file-on-disk -- we need to use a "random access" type
-// and track the offset to write next explicitly.
-bool shouldUseRandomAccessHandle(std::string const& path);
-
 // Open a native handle (fd or HANDLE) for writing.
 native_handle_t openFileToWrite(std::string const& path);
+
+// creates a FILE* based off h - caller is responsible for closing it
+FILE* fdOpen(native_handle_t h);
 
 // On POSIX, do rename(src, dst) then open dir and fsync() it
 // too: a necessary second step for ensuring durability.
@@ -64,20 +59,22 @@ native_handle_t openFileToWrite(std::string const& path);
 bool durableRename(std::string const& src, std::string const& dst,
                    std::string const& dir);
 
-// Whether a path exists
+// Return whether a path exists.
 bool exists(std::string const& path);
 
-// Delete a path and everything inside it (if a dir)
+// Delete a path and everything inside it (if a dir).
 void deltree(std::string const& path);
 
-// Make a single dir; not mkdir -p, i.e. non-recursive
+// Make a single dir; not mkdir -p, i.e. non-recursive. Returns true
+// if a directory was created (but false if it already existed).
 bool mkdir(std::string const& path);
 
-// Make a dir path like mkdir -p, i.e. recursive, uses '/' as dir separator
+// Make a dir path like mkdir -p, i.e. recursive, uses '/' as dir separator.
+// Returns true iff at the end of the call, the path exists and is a directory.
 bool mkpath(std::string const& path);
 
-// Get list of all files with names matching predicate
-// Returned names are relative to path
+// Get list of all files with names matching predicate in the provided directory
+// (but not its subdirectories). Returned names are relative to path.
 std::vector<std::string>
 findfiles(std::string const& path,
           std::function<bool(std::string const& name)> predicate);
@@ -85,19 +82,6 @@ findfiles(std::string const& path,
 size_t size(std::ifstream& ifs);
 
 size_t size(std::string const& path);
-
-class PathSplitter
-{
-  public:
-    explicit PathSplitter(std::string path);
-
-    std::string next();
-    bool hasNext() const;
-
-  private:
-    std::string mPath;
-    std::string::size_type mPos;
-};
 
 ////
 // Utility functions for constructing path names

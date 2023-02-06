@@ -27,6 +27,11 @@ void makeValid(TrustLineEntry& tl);
 void makeValid(OfferEntry& o);
 void makeValid(DataEntry& d);
 void makeValid(ClaimableBalanceEntry& c);
+void makeValid(LiquidityPoolEntry& lp);
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+void makeValid(ConfigSettingEntry& lp);
+void makeValid(ContractDataEntry& lp);
+#endif
 void makeValid(LedgerHeaderHistoryEntry& lh,
                LedgerHeaderHistoryEntry firstLedger,
                HistoryManager::LedgerVerificationStatus state);
@@ -34,9 +39,14 @@ void makeValid(LedgerHeaderHistoryEntry& lh,
 LedgerEntry generateValidLedgerEntry(size_t b = 3);
 std::vector<LedgerEntry> generateValidLedgerEntries(size_t n);
 
+// Use this instead of generator<LedgerKey> to avoid CONFIG_SETTING
+LedgerKey generateLedgerKey(size_t n);
+std::vector<LedgerKey> generateLedgerKeys(size_t n);
+
 AccountEntry generateValidAccountEntry(size_t b = 3);
 std::vector<AccountEntry> generateValidAccountEntries(size_t n);
 
+TrustLineEntry generateNonPoolShareValidTrustLineEntry(size_t b = 3);
 TrustLineEntry generateValidTrustLineEntry(size_t b = 3);
 std::vector<TrustLineEntry> generateValidTrustLineEntries(size_t n);
 
@@ -50,9 +60,22 @@ ClaimableBalanceEntry generateValidClaimableBalanceEntry(size_t b = 3);
 std::vector<ClaimableBalanceEntry>
 generateValidClaimableBalanceEntries(size_t n);
 
+LiquidityPoolEntry generateValidLiquidityPoolEntry(size_t b = 3);
+std::vector<LiquidityPoolEntry> generateValidLiquidityPoolEntries(size_t n);
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+ConfigSettingEntry generateValidConfigSettingEntry(size_t b = 3);
+std::vector<ConfigSettingEntry> generateValidConfigSettingEntries(size_t n);
+
+ContractDataEntry generateValidContractDataEntry(size_t b = 3);
+std::vector<ContractDataEntry> generateValidContractDataEntries(size_t n);
+#endif
+
 std::vector<LedgerHeaderHistoryEntry> generateLedgerHeadersForCheckpoint(
     LedgerHeaderHistoryEntry firstLedger, uint32_t size,
     HistoryManager::LedgerVerificationStatus state =
         HistoryManager::VERIFY_STATUS_OK);
+
+UpgradeType toUpgradeType(LedgerUpgrade const& upgrade);
 }
 }

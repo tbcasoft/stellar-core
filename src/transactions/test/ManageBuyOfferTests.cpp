@@ -19,6 +19,8 @@
 #include "transactions/OperationFrame.h"
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionUtils.h"
+#include "util/ProtocolVersion.h"
+#include "util/numeric128.h"
 #include "xdrpp/autocheck.h"
 
 using namespace stellar;
@@ -41,11 +43,10 @@ for_current_and_previous_version_from(size_t minVersion, Application& app,
     }
 }
 
-TEST_CASE("manage buy offer failure modes", "[tx][offers]")
+TEST_CASE_VERSIONS("manage buy offer failure modes", "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -156,14 +157,14 @@ TEST_CASE("manage buy offer failure modes", "[tx][offers]")
                 auto a1 = root.create("a1", minBalance3PlusFees);
                 a1.changeTrust(cur1, INT64_MAX);
                 issuer1.pay(a1, cur1, 1);
-                closeLedgerOn(*app, 2, 1, 1, 2016);
 
                 // remove issuer
                 issuer1.merge(root);
 
                 SECTION("sell no issuer")
                 {
-                    if (ledgerVersion < 13)
+                    if (protocolVersionIsBefore(ledgerVersion,
+                                                ProtocolVersion::V_13))
                     {
                         REQUIRE_THROWS_AS(
                             a1.manageBuyOffer(0, cur1, native, Price{1, 1}, 1),
@@ -177,7 +178,8 @@ TEST_CASE("manage buy offer failure modes", "[tx][offers]")
 
                 SECTION("buy no issuer")
                 {
-                    if (ledgerVersion < 13)
+                    if (protocolVersionIsBefore(ledgerVersion,
+                                                ProtocolVersion::V_13))
                     {
                         REQUIRE_THROWS_AS(
                             a1.manageBuyOffer(0, native, cur1, Price{1, 1}, 1),
@@ -351,11 +353,10 @@ TEST_CASE("manage buy offer failure modes", "[tx][offers]")
     }
 }
 
-TEST_CASE("manage buy offer liabilities", "[tx][offers]")
+TEST_CASE_VERSIONS("manage buy offer liabilities", "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     auto checkLiabilities = [&](std::string const& section, int64_t buyAmount,
                                 Price const& price, int64_t expectedBuying,
@@ -417,12 +418,16 @@ TEST_CASE("manage buy offer liabilities", "[tx][offers]")
 
             SECTION("with rounding")
             {
-                checkLiabilities("buy one for two", INT64_MAX, Price{2, 1},
-                                 bigDivide((uint128_t)INT64_MAX, 2, ROUND_DOWN),
-                                 INT64_MAX - 1);
-                checkLiabilities("buy two for five", INT64_MAX, Price{5, 2},
-                                 bigDivide(INT64_MAX, 2, 5, ROUND_DOWN),
-                                 INT64_MAX - 2);
+                checkLiabilities(
+                    "buy one for two", INT64_MAX, Price{2, 1},
+                    bigDivideOrThrow128(static_cast<uint64_t>(INT64_MAX), 2,
+                                        ROUND_DOWN),
+                    INT64_MAX - 1);
+                checkLiabilities(
+                    "buy two for five", INT64_MAX, Price{5, 2},
+                    bigDivideOrThrow(static_cast<uint64_t>(INT64_MAX), 2, 5,
+                                     ROUND_DOWN),
+                    INT64_MAX - 2);
             }
         }
 
@@ -430,11 +435,11 @@ TEST_CASE("manage buy offer liabilities", "[tx][offers]")
     });
 }
 
-TEST_CASE("manage buy offer exactly crosses existing offers", "[tx][offers]")
+TEST_CASE_VERSIONS("manage buy offer exactly crosses existing offers",
+                   "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -472,19 +477,21 @@ TEST_CASE("manage buy offer exactly crosses existing offers", "[tx][offers]")
         }
     };
 
-    doTest("buy five for two", Price{2, 5}, 20);
-    doTest("buy two for one", Price{1, 2}, 20);
-    doTest("buy one for one", Price{1, 1}, 20);
-    doTest("buy one for two", Price{2, 1}, 20);
-    doTest("buy two for five", Price{5, 2}, 20);
+    for_current_and_previous_version_from(11, *app, [&]() {
+        doTest("buy five for two", Price{2, 5}, 20);
+        doTest("buy two for one", Price{1, 2}, 20);
+        doTest("buy one for one", Price{1, 1}, 20);
+        doTest("buy one for two", Price{2, 1}, 20);
+        doTest("buy two for five", Price{5, 2}, 20);
+    });
 }
 
-TEST_CASE("manage buy offer matches manage sell offer when not executing",
-          "[tx][offers]")
+TEST_CASE_VERSIONS(
+    "manage buy offer matches manage sell offer when not executing",
+    "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -542,28 +549,35 @@ TEST_CASE("manage buy offer matches manage sell offer when not executing",
         {
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 20) ==
-                        getManageSellOfferAmount(Price{5, 2}, 8));
+                // Manually sequence LHS == RHS because gcc and clang
+                // differ and the order-difference produces different meta.
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 20);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 8);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 20) ==
-                        getManageSellOfferAmount(Price{2, 1}, 10));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 20);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 10);
+                REQUIRE(x == y);
             }
             SECTION("sell one for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 1}, 20) ==
-                        getManageSellOfferAmount(Price{1, 1}, 20));
+                auto x = getManageBuyOfferAmount(Price{1, 1}, 20);
+                auto y = getManageSellOfferAmount(Price{1, 1}, 20);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 20) ==
-                        getManageSellOfferAmount(Price{1, 2}, 40));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 20);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 40);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 20) ==
-                        getManageSellOfferAmount(Price{2, 5}, 50));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 20);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 50);
+                REQUIRE(x == y);
             }
         }
 
@@ -571,34 +585,40 @@ TEST_CASE("manage buy offer matches manage sell offer when not executing",
         {
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 21) ==
-                        getManageSellOfferAmount(Price{5, 2}, 8));
+                // Manually sequence LHS == RHS because gcc and clang
+                // differ and the order-difference produces different meta.
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 21);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 8);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 21) ==
-                        getManageSellOfferAmount(Price{2, 1}, 10));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 21);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 10);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 21) ==
-                        getManageSellOfferAmount(Price{1, 2}, 42));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 21);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 42);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 21) ==
-                        getManageSellOfferAmount(Price{2, 5}, 53));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 21);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 53);
+                REQUIRE(x == y);
             }
         }
     });
 }
 
-TEST_CASE("manage buy offer matches manage sell offer when executing partially",
-          "[tx][offers]")
+TEST_CASE_VERSIONS(
+    "manage buy offer matches manage sell offer when executing partially",
+    "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -683,63 +703,76 @@ TEST_CASE("manage buy offer matches manage sell offer when executing partially",
         {
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 200) ==
-                        getManageSellOfferAmount(Price{5, 2}, 80));
+                // Manually sequence LHS == RHS because gcc and clang
+                // differ and the order-difference produces different meta.
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 200);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 80);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 200) ==
-                        getManageSellOfferAmount(Price{2, 1}, 100));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 200);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 100);
+                REQUIRE(x == y);
             }
             SECTION("sell one for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 1}, 200) ==
-                        getManageSellOfferAmount(Price{1, 1}, 200));
+                auto x = getManageBuyOfferAmount(Price{1, 1}, 200);
+                auto y = getManageSellOfferAmount(Price{1, 1}, 200);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 200) ==
-                        getManageSellOfferAmount(Price{1, 2}, 400));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 200);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 400);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 200) ==
-                        getManageSellOfferAmount(Price{2, 5}, 500));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 200);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 500);
+                REQUIRE(x == y);
             }
         }
 
         SECTION("with rounding")
         {
+            // Manually sequence LHS == RHS because gcc and clang
+            // differ and the order-difference produces different meta.
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 201) ==
-                        getManageSellOfferAmount(Price{5, 2}, 80));
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 201);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 80);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 201) ==
-                        getManageSellOfferAmount(Price{2, 1}, 100));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 201);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 100);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 201) ==
-                        getManageSellOfferAmount(Price{1, 2}, 402));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 201);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 402);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 201) ==
-                        getManageSellOfferAmount(Price{2, 5}, 503));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 201);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 503);
+                REQUIRE(x == y);
             }
         }
     });
 }
 
-TEST_CASE("manage buy offer matches manage sell offer when executing entirely",
-          "[tx][offers]")
+TEST_CASE_VERSIONS(
+    "manage buy offer matches manage sell offer when executing entirely",
+    "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -824,28 +857,35 @@ TEST_CASE("manage buy offer matches manage sell offer when executing entirely",
         {
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 20) ==
-                        getManageSellOfferAmount(Price{5, 2}, 8));
+                // Manually sequence LHS == RHS because gcc and clang
+                // differ and the order-difference produces different meta.
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 20);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 8);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 20) ==
-                        getManageSellOfferAmount(Price{2, 1}, 10));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 20);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 10);
+                REQUIRE(x == y);
             }
             SECTION("sell one for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 1}, 20) ==
-                        getManageSellOfferAmount(Price{1, 1}, 20));
+                auto x = getManageBuyOfferAmount(Price{1, 1}, 20);
+                auto y = getManageSellOfferAmount(Price{1, 1}, 20);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 20) ==
-                        getManageSellOfferAmount(Price{1, 2}, 40));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 20);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 40);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 20) ==
-                        getManageSellOfferAmount(Price{2, 5}, 50));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 20);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 50);
+                REQUIRE(x == y);
             }
         }
 
@@ -853,33 +893,38 @@ TEST_CASE("manage buy offer matches manage sell offer when executing entirely",
         {
             SECTION("sell two for five")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 5}, 21) ==
-                        getManageSellOfferAmount(Price{5, 2}, 8));
+                // Manually sequence LHS == RHS because gcc and clang
+                // differ and the order-difference produces different meta.
+                auto x = getManageBuyOfferAmount(Price{2, 5}, 21);
+                auto y = getManageSellOfferAmount(Price{5, 2}, 8);
+                REQUIRE(x == y);
             }
             SECTION("sell one for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{1, 2}, 21) ==
-                        getManageSellOfferAmount(Price{2, 1}, 10));
+                auto x = getManageBuyOfferAmount(Price{1, 2}, 21);
+                auto y = getManageSellOfferAmount(Price{2, 1}, 10);
+                REQUIRE(x == y);
             }
             SECTION("sell two for one")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{2, 1}, 21) ==
-                        getManageSellOfferAmount(Price{1, 2}, 42));
+                auto x = getManageBuyOfferAmount(Price{2, 1}, 21);
+                auto y = getManageSellOfferAmount(Price{1, 2}, 42);
+                REQUIRE(x == y);
             }
             SECTION("sell five for two")
             {
-                REQUIRE(getManageBuyOfferAmount(Price{5, 2}, 21) ==
-                        getManageSellOfferAmount(Price{2, 5}, 53));
+                auto x = getManageBuyOfferAmount(Price{5, 2}, 21);
+                auto y = getManageSellOfferAmount(Price{2, 5}, 53);
+                REQUIRE(x == y);
             }
         }
     });
 }
 
-TEST_CASE("manage buy offer with zero liabilities", "[tx][offers]")
+TEST_CASE_VERSIONS("manage buy offer with zero liabilities", "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =
@@ -930,11 +975,11 @@ TEST_CASE("manage buy offer with zero liabilities", "[tx][offers]")
     });
 }
 
-TEST_CASE("manage buy offer releases liabilities before modify", "[tx][offers]")
+TEST_CASE_VERSIONS("manage buy offer releases liabilities before modify",
+                   "[tx][offers]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     int64_t const txfee = app->getLedgerManager().getLastTxFee();
     int64_t const minBalancePlusFees =

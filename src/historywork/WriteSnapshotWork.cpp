@@ -41,7 +41,7 @@ WriteSnapshotWork::onRun()
 
     auto work = [weak]() { //callback function
         auto self = weak.lock();
-        if (!self)
+        if (!self || self->isAborting())
         {
 	    CLOG_ERROR(History, "Witin callback function for executed work  Unexpected state, work is nil");
             return;

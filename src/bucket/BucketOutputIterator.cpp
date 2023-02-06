@@ -6,6 +6,7 @@
 #include "bucket/Bucket.h"
 #include "bucket/BucketManager.h"
 #include "crypto/Random.h"
+#include "util/GlobalChecks.h"
 #include <Tracy.hpp>
 
 namespace stellar
@@ -52,8 +53,9 @@ BucketOutputIterator::BucketOutputIterator(std::string const& tmpDir,
     // Will throw if unable to open the file
     mOut.open(mFilename);
 
-    if (meta.ledgerVersion >=
-        Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY)
+    if (protocolVersionStartsFrom(
+            meta.ledgerVersion,
+            Bucket::FIRST_PROTOCOL_SUPPORTING_INITENTRY_AND_METAENTRY))
     {
         BucketEntry bme;
         bme.type(METAENTRY);
@@ -88,7 +90,7 @@ BucketOutputIterator::put(BucketEntry const& e)
     {
         // mCmp(e, *mBuf) means e < *mBuf; this should never be true since
         // it would mean that we're getting entries out of order.
-        assert(!mCmp(e, *mBuf));
+        releaseAssert(!mCmp(e, *mBuf));
 
         // Check to see if the new entry should flush (greater identity), or
         // merely replace (same identity), the buffered entry.
@@ -124,8 +126,8 @@ BucketOutputIterator::getBucket(BucketManager& bucketManager,
     mOut.close();
     if (mObjectsPut == 0 || mBytesPut == 0)
     {
-        assert(mObjectsPut == 0);
-        assert(mBytesPut == 0);
+        releaseAssert(mObjectsPut == 0);
+        releaseAssert(mBytesPut == 0);
         CLOG_DEBUG(Bucket, "Deleting empty bucket file {}", mFilename);
         std::remove(mFilename.c_str());
         if (mergeKey)

@@ -7,10 +7,12 @@
 #include "crypto/SignerKey.h"
 #include "database/Database.h"
 #include "herder/Herder.h"
+#include "herder/simulation/TxSimTxSetFrame.h"
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
+#include "ledger/test/LedgerTestUtils.h"
 #include "main/Application.h"
 #include "test/TestAccount.h"
 #include "test/TestExceptions.h"
@@ -22,6 +24,7 @@
 #include "transactions/TransactionSQL.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
 
@@ -113,10 +116,11 @@ expectedResult(int64_t fee, size_t opsCount, TransactionResultCode code,
 bool
 applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
 {
+    // Close the ledger here to advance ledgerSeq
+    closeLedger(app);
+
     LedgerTxn ltx(app.getLedgerTxnRoot());
-    // Increment ledgerSeq to simulate the behavior of closeLedger, which begins
-    // by advancing the ledgerSeq.
-    ++ltx.loadHeader().current().ledgerSeq;
+
     auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
 
     bool check = false;
@@ -174,7 +178,7 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             tx->processFeeSeqNum(ltxFeeProc, baseFee);
             // check that the recommended fee is correct, ignore the difference
             // for later
-            if (ledgerVersion >= 11)
+            if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_11))
             {
                 REQUIRE(checkResult.feeCharged >= tx->getResult().feeCharged);
             }
@@ -197,7 +201,7 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             REQUIRE(currAcc.accountID == tx->getSourceID());
             REQUIRE(currAcc.balance < prevAcc.balance);
             currAcc.balance = prevAcc.balance;
-            if (ledgerVersion <= 9)
+            if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_10))
             {
                 // v9 and below, we also need to verify that the sequence number
                 // also got processed at this time
@@ -271,12 +275,15 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 bool earlyFailure =
                     (code == txMISSING_OPERATION || code == txTOO_EARLY ||
                      code == txTOO_LATE || code == txINSUFFICIENT_FEE ||
-                     code == txBAD_SEQ);
+                     code == txBAD_SEQ || code == txMALFORMED);
                 // verify that the sequence number changed (v10+)
                 // do not perform the check if there was a failure before
                 // or during the sequence number processing
                 auto header = ltxTx.loadHeader();
-                if (checkSeqNum && ledgerVersion >= 10 && !earlyFailure)
+                if (checkSeqNum &&
+                    protocolVersionStartsFrom(ledgerVersion,
+                                              ProtocolVersion::V_10) &&
+                    !earlyFailure)
                 {
                     REQUIRE(srcAccountAfter.current().data.account().seqNum ==
                             (srcAccountBefore.seqNum + 1));
@@ -285,8 +292,12 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 if (!res)
                 {
                     bool noChangeOnEarlyFailure =
-                        earlyFailure && ledgerVersion < 13;
-                    if (noChangeOnEarlyFailure || ledgerVersion <= 9)
+                        earlyFailure &&
+                        protocolVersionIsBefore(ledgerVersion,
+                                                ProtocolVersion::V_13);
+                    if (noChangeOnEarlyFailure ||
+                        protocolVersionIsBefore(ledgerVersion,
+                                                ProtocolVersion::V_10))
                     {
                         // no changes during an early failure
                         REQUIRE(ltxTx.getDelta().entry.empty());
@@ -307,7 +318,9 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
 
                             // From V13, it's possible to remove one-time
                             // signers on early failures
-                            if (ledgerVersion >= 13 && earlyFailure)
+                            if (protocolVersionStartsFrom(
+                                    ledgerVersion, ProtocolVersion::V_13) &&
+                                earlyFailure)
                             {
                                 auto currAcc =
                                     current->ledgerEntry().data.account();
@@ -315,8 +328,26 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                                     previous->ledgerEntry().data.account();
                                 REQUIRE(currAcc.signers.size() + 1 ==
                                         prevAcc.signers.size());
+                                REQUIRE(hasAccountEntryExtV2(currAcc) ==
+                                        hasAccountEntryExtV2(prevAcc));
+
                                 // signers should be the only change so this
                                 // should make the accounts equivalent
+                                if (hasAccountEntryExtV2(currAcc))
+                                {
+                                    auto& currSignerSponsoringIDs =
+                                        getAccountEntryExtensionV2(currAcc)
+                                            .signerSponsoringIDs;
+                                    auto const& prevSignerSponsoringIDs =
+                                        getAccountEntryExtensionV2(prevAcc)
+                                            .signerSponsoringIDs;
+
+                                    REQUIRE(currSignerSponsoringIDs.size() +
+                                                1 ==
+                                            prevSignerSponsoringIDs.size());
+                                    currSignerSponsoringIDs =
+                                        prevSignerSponsoringIDs;
+                                }
                                 currAcc.signers = prevAcc.signers;
                                 currAcc.numSubEntries = prevAcc.numSubEntries;
                                 REQUIRE(currAcc == prevAcc);
@@ -328,13 +359,11 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             }
         }
         ltxTx.commit();
+        recordOrCheckGlobalTestTxMetadata(tm);
     }
 
-    // Undo the increment from the beginning of this function. Note that if this
-    // function exits without reaching this point, then ltx will not be
-    // committed and the increment will be rolled back anyway.
-    --ltx.loadHeader().current().ledgerSeq;
     ltx.commit();
+
     return res;
 }
 
@@ -353,6 +382,18 @@ applyTx(TransactionFramePtr const& tx, Application& app, bool checkSeqNum)
     applyCheck(tx, app, checkSeqNum);
     throwIf(tx->getResult());
     checkTransaction(*tx, app);
+
+    LedgerTxn ltx(app.getLedgerTxnRoot());
+    auto account = stellar::loadAccount(ltx, tx->getSourceID());
+    if (protocolVersionStartsFrom(ltx.loadHeader().current().ledgerVersion,
+                                  ProtocolVersion::V_19) &&
+        account)
+    {
+        auto const& v3 =
+            getAccountEntryExtensionV3(account.current().data.account());
+        REQUIRE(v3.seqLedger == ltx.loadHeader().current().ledgerSeq);
+        REQUIRE(v3.seqTime == ltx.loadHeader().current().scpValue.closeTime);
+    }
 }
 
 void
@@ -393,6 +434,21 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
     REQUIRE(applyOk == shouldApplyOk);
 };
 
+void
+checkLiquidityPool(Application& app, PoolID const& poolID, int64_t reserveA,
+                   int64_t reserveB, int64_t totalPoolShares,
+                   int64_t poolSharesTrustLineCount)
+{
+    LedgerTxn ltx(app.getLedgerTxnRoot());
+    auto lp = loadLiquidityPool(ltx, poolID);
+    REQUIRE(lp);
+    auto const& cp = lp.current().data.liquidityPool().body.constantProduct();
+    REQUIRE(cp.reserveA == reserveA);
+    REQUIRE(cp.reserveB == reserveB);
+    REQUIRE(cp.totalPoolShares == totalPoolShares);
+    REQUIRE(cp.poolSharesTrustLineCount == poolSharesTrustLineCount);
+}
+
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
               std::vector<TransactionFrameBasePtr> const& txs, bool strictOrder)
@@ -401,53 +457,83 @@ closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
                          strictOrder);
 }
 
-class TxSetFrameStrictOrderForTesting : public TxSetFrame
-{
-  public:
-    TxSetFrameStrictOrderForTesting(Hash const& previousLedgerHash)
-        : TxSetFrame(previousLedgerHash){};
-
-    std::vector<TransactionFrameBasePtr>
-    sortForApply() override
-    {
-        return mTransactions;
-    };
-
-    void sortForHash() override{};
-};
-
 TxSetResultMeta
-closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+closeLedgerOn(Application& app, int day, int month, int year,
               std::vector<TransactionFrameBasePtr> const& txs, bool strictOrder)
 {
-    std::shared_ptr<TxSetFrame> txSet;
-    auto lclHash = app.getLedgerManager().getLastClosedLedgerHeader().hash;
+    auto nextLedgerSeq = app.getLedgerManager().getLastClosedLedgerNum() + 1;
+    return closeLedgerOn(app, nextLedgerSeq, getTestDate(day, month, year), txs,
+                         strictOrder);
+}
+
+TxSetResultMeta
+closeLedger(Application& app, std::vector<TransactionFrameBasePtr> const& txs,
+            bool strictOrder)
+{
+    auto lastCloseTime = app.getLedgerManager()
+                             .getLastClosedLedgerHeader()
+                             .header.scpValue.closeTime;
+
+    auto nextLedgerSeq = app.getLedgerManager().getLastClosedLedgerNum() + 1;
+
+    return closeLedgerOn(app, nextLedgerSeq, lastCloseTime, txs, strictOrder);
+}
+
+TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, TimePoint closeTime,
+              std::vector<TransactionFrameBasePtr> const& txs, bool strictOrder)
+{
+    auto lastCloseTime = app.getLedgerManager()
+                             .getLastClosedLedgerHeader()
+                             .header.scpValue.closeTime;
+    if (closeTime < lastCloseTime)
+    {
+        closeTime = lastCloseTime;
+    }
+
+    TxSetFrameConstPtr txSet;
     if (strictOrder)
     {
-        txSet = std::make_shared<TxSetFrameStrictOrderForTesting>(lclHash);
+        txSet = std::make_shared<txsimulation::SimApplyOrderTxSetFrame const>(
+            app.getLedgerManager().getLastClosedLedgerHeader(), txs);
     }
     else
     {
-        txSet = std::make_shared<TxSetFrame>(lclHash);
+        txSet = TxSetFrame::makeFromTransactions(txs, app, 0, 0);
     }
-
-    for (auto const& tx : txs)
-    {
-        txSet->add(tx);
-    }
-
-    txSet->sortForHash();
     if (!strictOrder)
     {
+        // `strictOrder` means the txs in the txSet will be applied in the exact
+        // same order as they were constructed. It could also imply the txs
+        // themselves maybe intentionally invalid for testing purpose.
         REQUIRE(txSet->checkValid(app, 0, 0));
     }
 
-    StellarValue sv = app.getHerder().makeStellarValue(
-        txSet->getContentsHash(), closeTime, emptyUpgradeSteps,
-        app.getConfig().NODE_SEED);
+    app.getHerder().externalizeValue(txSet, ledgerSeq, closeTime,
+                                     emptyUpgradeSteps);
 
-    LedgerCloseData ledgerData(ledgerSeq, txSet, sv);
-    app.getLedgerManager().closeLedger(ledgerData);
+    auto z1 = getTransactionHistoryResults(app.getDatabase(), ledgerSeq);
+    auto z2 = getTransactionFeeMeta(app.getDatabase(), ledgerSeq);
+
+    REQUIRE(app.getLedgerManager().getLastClosedLedgerNum() == ledgerSeq);
+
+    TxSetResultMeta res;
+    std::transform(
+        z1.results.begin(), z1.results.end(), z2.begin(),
+        std::back_inserter(res),
+        [](TransactionResultPair const& r1, LedgerEntryChanges const& r2) {
+            return std::make_pair(r1, r2);
+        });
+
+    return res;
+}
+
+TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+              TxSetFrameConstPtr txSet)
+{
+    app.getHerder().externalizeValue(txSet, ledgerSeq, closeTime,
+                                     emptyUpgradeSteps);
 
     auto z1 = getTransactionHistoryResults(app.getDatabase(), ledgerSeq);
     auto z2 = getTransactionFeeMeta(app.getDatabase(), ledgerSeq);
@@ -516,7 +602,7 @@ getAccountSigners(PublicKey const& k, Application& app)
 TransactionFramePtr
 transactionFromOperationsV0(Application& app, SecretKey const& from,
                             SequenceNumber seq,
-                            const std::vector<Operation>& ops, int fee)
+                            const std::vector<Operation>& ops, uint32_t fee)
 {
     TransactionEnvelope e(ENVELOPE_TYPE_TX_V0);
     e.v0().tx.sourceAccountEd25519 = from.getPublicKey().ed25519();
@@ -538,7 +624,8 @@ transactionFromOperationsV0(Application& app, SecretKey const& from,
 TransactionFramePtr
 transactionFromOperationsV1(Application& app, SecretKey const& from,
                             SequenceNumber seq,
-                            const std::vector<Operation>& ops, int fee)
+                            const std::vector<Operation>& ops, uint32_t fee,
+                            std::optional<PreconditionsV2> cond)
 {
     TransactionEnvelope e(ENVELOPE_TYPE_TX);
     e.v1().tx.sourceAccount = toMuxedAccount(from.getPublicKey());
@@ -551,6 +638,12 @@ transactionFromOperationsV1(Application& app, SecretKey const& from,
     std::copy(std::begin(ops), std::end(ops),
               std::back_inserter(e.v1().tx.operations));
 
+    if (cond)
+    {
+        e.v1().tx.cond.type(PRECOND_V2);
+        e.v1().tx.cond.v2() = *cond;
+    }
+
     auto res = std::static_pointer_cast<TransactionFrame>(
         TransactionFrameBase::makeTransactionFromWire(app.getNetworkID(), e));
     res->addSignature(from);
@@ -560,22 +653,38 @@ transactionFromOperationsV1(Application& app, SecretKey const& from,
 TransactionFramePtr
 transactionFromOperations(Application& app, SecretKey const& from,
                           SequenceNumber seq, const std::vector<Operation>& ops,
-                          int fee)
+                          uint32_t fee)
 {
     uint32_t ledgerVersion;
     {
         LedgerTxn ltx(app.getLedgerTxnRoot());
         ledgerVersion = ltx.loadHeader().current().ledgerVersion;
     }
-    if (ledgerVersion < 13)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_13))
     {
         return transactionFromOperationsV0(app, from, seq, ops, fee);
     }
     return transactionFromOperationsV1(app, from, seq, ops, fee);
 }
 
+TransactionFramePtr
+transactionWithV2Precondition(Application& app, TestAccount& account,
+                              int64_t sequenceDelta, uint32_t fee,
+                              PreconditionsV2 const& cond)
+{
+    return transactionFromOperationsV1(
+        app, account, account.getLastSequenceNumber() + sequenceDelta,
+        {payment(account.getPublicKey(), 1)}, fee, cond);
+}
+
 Operation
 changeTrust(Asset const& asset, int64_t limit)
+{
+    return changeTrust(assetToChangeTrustAsset(asset), limit);
+}
+
+Operation
+changeTrust(ChangeTrustAsset const& asset, int64_t limit)
 {
     Operation op;
 
@@ -593,8 +702,18 @@ allowTrust(PublicKey const& trustor, Asset const& asset, uint32_t authorize)
 
     op.body.type(ALLOW_TRUST);
     op.body.allowTrustOp().trustor = trustor;
-    op.body.allowTrustOp().asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
-    op.body.allowTrustOp().asset.assetCode4() = asset.alphaNum4().assetCode;
+    op.body.allowTrustOp().asset.type(asset.type());
+
+    if (asset.type() == ASSET_TYPE_CREDIT_ALPHANUM4)
+    {
+        op.body.allowTrustOp().asset.assetCode4() = asset.alphaNum4().assetCode;
+    }
+    else
+    {
+        op.body.allowTrustOp().asset.assetCode12() =
+            asset.alphaNum12().assetCode;
+    }
+
     op.body.allowTrustOp().authorize = authorize;
 
     return op;
@@ -682,6 +801,19 @@ makeAssetAlphanum12(SecretKey const& issuer, std::string const& code)
     asset.alphaNum12().issuer = issuer.getPublicKey();
     strToAssetCode(asset.alphaNum12().assetCode, code);
     return asset;
+}
+
+ChangeTrustAsset
+makeChangeTrustAssetPoolShare(Asset const& assetA, Asset const& assetB,
+                              int32_t fee)
+{
+    REQUIRE(assetA < assetB);
+    ChangeTrustAsset poolAsset;
+    poolAsset.type(ASSET_TYPE_POOL_SHARE);
+    poolAsset.liquidityPool().constantProduct().assetA = assetA;
+    poolAsset.liquidityPool().constantProduct().assetB = assetB;
+    poolAsset.liquidityPool().constantProduct().fee = fee;
+    return poolAsset;
 }
 
 Operation
@@ -1289,6 +1421,34 @@ clawbackClaimableBalance(ClaimableBalanceID const& balanceID)
     return op;
 }
 
+Operation
+liquidityPoolDeposit(PoolID const& poolID, int64_t maxAmountA,
+                     int64_t maxAmountB, Price const& minPrice,
+                     Price const& maxPrice)
+{
+    Operation op;
+    op.body.type(LIQUIDITY_POOL_DEPOSIT);
+    op.body.liquidityPoolDepositOp().liquidityPoolID = poolID;
+    op.body.liquidityPoolDepositOp().maxAmountA = maxAmountA;
+    op.body.liquidityPoolDepositOp().maxAmountB = maxAmountB;
+    op.body.liquidityPoolDepositOp().minPrice = minPrice;
+    op.body.liquidityPoolDepositOp().maxPrice = maxPrice;
+    return op;
+}
+
+Operation
+liquidityPoolWithdraw(PoolID const& poolID, int64_t amount, int64_t minAmountA,
+                      int64_t minAmountB)
+{
+    Operation op;
+    op.body.type(LIQUIDITY_POOL_WITHDRAW);
+    op.body.liquidityPoolWithdrawOp().liquidityPoolID = poolID;
+    op.body.liquidityPoolWithdrawOp().amount = amount;
+    op.body.liquidityPoolWithdrawOp().minAmountA = minAmountA;
+    op.body.liquidityPoolWithdrawOp().minAmountB = minAmountB;
+    return op;
+}
+
 OperationFrame const&
 getFirstOperationFrame(TransactionFrame const& tx)
 {
@@ -1331,7 +1491,8 @@ sign(Hash const& networkID, SecretKey key, TransactionV1Envelope& env)
 static TransactionEnvelope
 envelopeFromOps(Hash const& networkID, TestAccount& source,
                 std::vector<Operation> const& ops,
-                std::vector<SecretKey> const& opKeys)
+                std::vector<SecretKey> const& opKeys,
+                std::optional<PreconditionsV2> cond = std::nullopt)
 {
     TransactionEnvelope tx(ENVELOPE_TYPE_TX);
     tx.v1().tx.sourceAccount = toMuxedAccount(source);
@@ -1339,6 +1500,12 @@ envelopeFromOps(Hash const& networkID, TestAccount& source,
     tx.v1().tx.seqNum = source.nextSequenceNumber();
     std::copy(ops.begin(), ops.end(),
               std::back_inserter(tx.v1().tx.operations));
+
+    if (cond)
+    {
+        tx.v1().tx.cond.type(PRECOND_V2);
+        tx.v1().tx.cond.v2() = *cond;
+    }
 
     sign(networkID, source, tx.v1());
     for (auto const& opKey : opKeys)
@@ -1351,10 +1518,117 @@ envelopeFromOps(Hash const& networkID, TestAccount& source,
 TransactionFrameBasePtr
 transactionFrameFromOps(Hash const& networkID, TestAccount& source,
                         std::vector<Operation> const& ops,
-                        std::vector<SecretKey> const& opKeys)
+                        std::vector<SecretKey> const& opKeys,
+                        std::optional<PreconditionsV2> cond)
 {
     return TransactionFrameBase::makeTransactionFromWire(
-        networkID, envelopeFromOps(networkID, source, ops, opKeys));
+        networkID, envelopeFromOps(networkID, source, ops, opKeys, cond));
 }
+
+LedgerUpgrade
+makeBaseReserveUpgrade(int baseReserve)
+{
+    auto result = LedgerUpgrade{LEDGER_UPGRADE_BASE_RESERVE};
+    result.newBaseReserve() = baseReserve;
+    return result;
+}
+
+LedgerHeader
+executeUpgrades(Application& app, xdr::xvector<UpgradeType, 6> const& upgrades)
+{
+    auto& lm = app.getLedgerManager();
+    auto const& lcl = lm.getLastClosedLedgerHeader();
+    auto txSet = TxSetFrame::makeEmpty(lcl);
+    auto lastCloseTime = lcl.header.scpValue.closeTime;
+    app.getHerder().externalizeValue(txSet, lcl.header.ledgerSeq + 1,
+                                     lastCloseTime, upgrades);
+    return lm.getLastClosedLedgerHeader().header;
+};
+
+LedgerHeader
+executeUpgrade(Application& app, LedgerUpgrade const& lupgrade)
+{
+    return executeUpgrades(app, {LedgerTestUtils::toUpgradeType(lupgrade)});
+};
+
+// trades is a vector of pairs, where the bool indicates if assetA or assetB is
+// sent in the payment, and the int64_t is the amount
+void
+depositTradeWithdrawTest(Application& app, TestAccount& root, int depositSize,
+                         std::vector<std::pair<bool, int64_t>> const& trades)
+{
+    struct Deposit
+    {
+        TestAccount acc;
+        int64_t numPoolShares;
+    };
+    std::vector<Deposit> deposits;
+
+    int64_t total = 0;
+
+    auto cur1 = makeAsset(root, "CUR1");
+    auto cur2 = makeAsset(root, "CUR2");
+    auto share12 =
+        makeChangeTrustAssetPoolShare(cur1, cur2, LIQUIDITY_POOL_FEE_V18);
+    auto pool12 = xdrSha256(share12.liquidityPool());
+
+    auto deposit = [&](int64_t accNum, int64_t size) {
+        auto acc = root.create(fmt::format("account{}", accNum),
+                               app.getLedgerManager().getLastMinBalance(10));
+        acc.changeTrust(cur1, INT64_MAX);
+        acc.changeTrust(cur2, INT64_MAX);
+        acc.changeTrust(share12, INT64_MAX);
+
+        root.pay(acc, cur1, size);
+        root.pay(acc, cur2, size);
+
+        acc.liquidityPoolDeposit(pool12, size, size, Price{1, INT32_MAX},
+                                 Price{INT32_MAX, 1});
+
+        total += size;
+
+        checkLiquidityPool(app, pool12, total, total, total, accNum + 1);
+
+        deposits.emplace_back(Deposit{acc, size});
+    };
+
+    // deposit
+    deposit(0, depositSize);
+    deposit(1, depositSize);
+
+    for (auto const& trade : trades)
+    {
+        auto const& sendAsset = trade.first ? cur1 : cur2;
+        auto const& recvAsset = trade.first ? cur2 : cur1;
+        root.pay(root, sendAsset, INT64_MAX, recvAsset, trade.second, {});
+    }
+
+    // withdraw in reverse order
+    for (auto rit = deposits.rbegin(); rit != deposits.rend(); ++rit)
+    {
+        auto& d = *rit;
+        d.acc.liquidityPoolWithdraw(pool12, d.numPoolShares, 0, 0);
+
+        total -= d.numPoolShares;
+    }
+
+    checkLiquidityPool(app, pool12, 0, 0, 0, 2);
+
+    // delete trustlines
+    int i = 2;
+    for (auto& dep : deposits)
+    {
+        dep.acc.changeTrust(share12, 0);
+
+        if (--i > 0)
+        {
+            checkLiquidityPool(app, pool12, 0, 0, 0, i);
+        }
+    }
+
+    LedgerTxn ltx(app.getLedgerTxnRoot());
+    REQUIRE(!loadLiquidityPool(ltx, pool12));
+}
+
 }
 }

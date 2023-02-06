@@ -19,6 +19,7 @@
 #include "util/Fs.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include <Tracy.hpp>
 #include <fmt/format.h>
 
@@ -137,7 +138,8 @@ HistoryArchiveState::load(std::string const& inFile)
     std::ifstream in(inFile);
     if (!in)
     {
-        throw std::runtime_error(fmt::format("Error opening file {}", inFile));
+        throw std::runtime_error(
+            fmt::format(FMT_STRING("Error opening file {}"), inFile));
     }
     in.exceptions(std::ios::badbit);
     cereal::JSONInputArchive ar(in);
@@ -226,7 +228,7 @@ std::vector<std::string>
 HistoryArchiveState::differingBuckets(HistoryArchiveState const& other) const
 {
     ZoneScoped;
-    assert(futuresAllResolved());
+    releaseAssert(futuresAllResolved());
     std::set<std::string> inhibit;
     uint256 zero;
     inhibit.insert(binToHex(zero));
@@ -321,8 +323,9 @@ HistoryArchiveState::containsValidBuckets(Application& app) const
     };
 
     // Iterate bottom-up, from oldest to newest buckets
-    for (uint32_t i = BucketList::kNumLevels - 1; i >= 0; i--)
+    for (uint32_t j = BucketList::kNumLevels; j != 0; --j)
     {
+        auto i = j - 1;
         auto const& level = currentBuckets[i];
 
         // Note: snap is always older than curr, and therefore must be processed
@@ -355,7 +358,8 @@ HistoryArchiveState::containsValidBuckets(Application& app) const
             // No real buckets seen yet, move on
             continue;
         }
-        else if (prevSnapVersion >= Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED)
+        else if (protocolVersionStartsFrom(
+                     prevSnapVersion, Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED))
         {
             if (!level.next.isClear())
             {
@@ -379,7 +383,7 @@ HistoryArchiveState::prepareForPublish(Application& app)
 {
     ZoneScoped;
     // Level 0 future buckets are always clear
-    assert(currentBuckets[0].next.isClear());
+    releaseAssert(currentBuckets[0].next.isClear());
 
     for (uint32_t i = 1; i < BucketList::kNumLevels; i++)
     {
@@ -388,8 +392,9 @@ HistoryArchiveState::prepareForPublish(Application& app)
 
         auto snap =
             app.getBucketManager().getBucketByHash(hexToBin256(prev.snap));
-        if (!level.next.isClear() && Bucket::getBucketVersion(snap) >=
-                                         Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED)
+        if (!level.next.isClear() &&
+            protocolVersionStartsFrom(Bucket::getBucketVersion(snap),
+                                      Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED))
         {
             level.next.clear();
         }
@@ -406,7 +411,7 @@ HistoryArchiveState::prepareForPublish(Application& app)
             // that it'd be somewhat convoluted _to_ materialize the true value
             // here, we're going to live with the approximate value for now.
             uint32_t maxProtocolVersion =
-                Config::CURRENT_LEDGER_PROTOCOL_VERSION;
+                app.getConfig().LEDGER_PROTOCOL_VERSION;
             level.next.makeLive(app, maxProtocolVersion, i);
         }
     }
@@ -446,10 +451,6 @@ HistoryArchiveState::HistoryArchiveState(uint32_t ledgerSeq,
 HistoryArchive::HistoryArchive(Application& app,
                                HistoryArchiveConfiguration const& config)
     : mConfig(config)
-    , mSuccessMeter(app.getMetrics().NewMeter(
-          {"history-archive", config.mName, "success"}, "event"))
-    , mFailureMeter(app.getMetrics().NewMeter(
-          {"history-archive", config.mName, "failure"}, "event"))
 {
 }
 
@@ -505,29 +506,5 @@ HistoryArchive::mkdirCmd(std::string const& remoteDir) const
     if (mConfig.mMkdirCmd.empty())
         return "";
     return formatString(mConfig.mMkdirCmd, remoteDir);
-}
-
-void
-HistoryArchive::markSuccess()
-{
-    mSuccessMeter.Mark();
-}
-
-void
-HistoryArchive::markFailure()
-{
-    mFailureMeter.Mark();
-}
-
-uint64_t
-HistoryArchive::getSuccessCount() const
-{
-    return mSuccessMeter.count();
-}
-
-uint64_t
-HistoryArchive::getFailureCount() const
-{
-    return mFailureMeter.count();
 }
 }

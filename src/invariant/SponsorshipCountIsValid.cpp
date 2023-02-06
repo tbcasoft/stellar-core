@@ -7,6 +7,8 @@
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
 #include "transactions/TransactionUtils.h"
+#include "util/GlobalChecks.h"
+#include "util/ProtocolVersion.h"
 #include "util/UnorderedMap.h"
 #include <fmt/format.h>
 
@@ -38,11 +40,19 @@ getMult(LedgerEntry const& le)
     case ACCOUNT:
         return 2;
     case TRUSTLINE:
+        return le.data.trustLine().asset.type() == ASSET_TYPE_POOL_SHARE ? 2
+                                                                         : 1;
     case OFFER:
     case DATA:
         return 1;
     case CLAIMABLE_BALANCE:
         return le.data.claimableBalance().claimants.size();
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+    case CONFIG_SETTING:
+#endif
+    case LIQUIDITY_POOL:
+        throw std::runtime_error("invalid LedgerEntry type");
     default:
         abort();
     }
@@ -61,7 +71,13 @@ getAccountID(LedgerEntry const& le)
         return le.data.offer().sellerID;
     case DATA:
         return le.data.data().accountID;
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+    case CONFIG_SETTING:
+#endif
     case CLAIMABLE_BALANCE:
+    case LIQUIDITY_POOL:
+        throw std::runtime_error("invalid LedgerEntry type");
     default:
         abort();
     }
@@ -132,8 +148,8 @@ getDeltaSponsoringAndSponsored(std::shared_ptr<InternalLedgerEntry const> le,
 {
     if (le)
     {
-        assert(le->type() == InternalLedgerEntryType::LEDGER_ENTRY &&
-               le->ledgerEntry().data.type() == ACCOUNT);
+        releaseAssert(le->type() == InternalLedgerEntryType::LEDGER_ENTRY &&
+                      le->ledgerEntry().data.type() == ACCOUNT);
         auto const& ae = le->ledgerEntry().data.account();
         if (hasAccountEntryExtV2(ae))
         {
@@ -151,7 +167,7 @@ SponsorshipCountIsValid::checkOnOperationApply(Operation const& operation,
 {
     // No sponsorships prior to protocol 14
     auto ledgerVersion = ltxDelta.header.current.ledgerVersion;
-    if (ledgerVersion < 14)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_14))
     {
         return {};
     }
@@ -187,16 +203,18 @@ SponsorshipCountIsValid::checkOnOperationApply(Operation const& operation,
         if (numSponsoring[accountID] != deltaNumSponsoring)
         {
             return fmt::format(
-                "Change in Account {} numSponsoring ({}) does not"
-                " match change in number of sponsored entries ({})",
+                FMT_STRING(
+                    "Change in Account {} numSponsoring ({:d}) does not"
+                    " match change in number of sponsored entries ({:d})"),
                 KeyUtils::toStrKey(accountID), deltaNumSponsoring,
                 numSponsoring[accountID]);
         }
         if (numSponsored[accountID] != deltaNumSponsored)
         {
             return fmt::format(
-                "Change in Account {} numSponsored ({}) does not"
-                " match change in number of sponsored entries ({})",
+                FMT_STRING(
+                    "Change in Account {} numSponsored ({:d}) does not"
+                    " match change in number of sponsored entries ({:d})"),
                 KeyUtils::toStrKey(accountID), deltaNumSponsored,
                 numSponsored[accountID]);
         }
@@ -211,8 +229,9 @@ SponsorshipCountIsValid::checkOnOperationApply(Operation const& operation,
         if (kv.second != 0)
         {
             return fmt::format(
-                "Change in Account {} numSponsoring (0) does not"
-                " match change in number of sponsored entries ({})",
+                FMT_STRING(
+                    "Change in Account {} numSponsoring (0) does not"
+                    " match change in number of sponsored entries ({:d})"),
                 KeyUtils::toStrKey(kv.first), kv.second);
         }
     }
@@ -221,8 +240,9 @@ SponsorshipCountIsValid::checkOnOperationApply(Operation const& operation,
         if (kv.second != 0)
         {
             return fmt::format(
-                "Change in Account {} numSponsored (0) does not"
-                " match change in number of sponsored entries ({})",
+                FMT_STRING(
+                    "Change in Account {} numSponsored (0) does not"
+                    " match change in number of sponsored entries ({:d})"),
                 KeyUtils::toStrKey(kv.first), kv.second);
         }
     }

@@ -3,6 +3,7 @@
 #include "crypto/Hex.h"
 #include "herder/Upgrades.h"
 #include "main/Application.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
 #include <overlay/OverlayManager.h>
@@ -13,15 +14,15 @@ using namespace std;
 namespace stellar
 {
 
-LedgerCloseData::LedgerCloseData(
-    uint32_t ledgerSeq, std::shared_ptr<AbstractTxSetFrameForApply> txSet,
-    StellarValue const& v, std::optional<Hash> const& expectedLedgerHash)
+LedgerCloseData::LedgerCloseData(uint32_t ledgerSeq, TxSetFrameConstPtr txSet,
+                                 StellarValue const& v,
+                                 std::optional<Hash> const& expectedLedgerHash)
     : mLedgerSeq(ledgerSeq)
     , mTxSet(txSet)
     , mValue(v)
     , mExpectedLedgerHash(expectedLedgerHash)
 {
-    assert(txSet->getContentsHash() == mValue.txSetHash);
+    releaseAssert(txSet->getContentsHash() == mValue.txSetHash);
 }
 
 std::string

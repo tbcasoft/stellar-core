@@ -24,10 +24,10 @@
 #include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionUtils.h"
-#include "util/Algoritm.h"
 #include "util/Decoder.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include "util/XDRStream.h"
 #include "xdrpp/marshal.h"
@@ -86,7 +86,7 @@ TransactionFrame::getContentsHash() const
         }
     }
 #ifdef _DEBUG
-    assert(isZero(oldHash) || (oldHash == mContentsHash));
+    releaseAssert(isZero(oldHash) || (oldHash == mContentsHash));
 #endif
     return (mContentsHash);
 }
@@ -144,6 +144,14 @@ TransactionFrame::getNumOperations() const
                : static_cast<uint32_t>(mEnvelope.v1().tx.operations.size());
 }
 
+std::vector<Operation> const&
+TransactionFrame::getRawOperations() const
+{
+    return mEnvelope.type() == ENVELOPE_TYPE_TX_V0
+               ? mEnvelope.v0().tx.operations
+               : mEnvelope.v1().tx.operations;
+}
+
 int64_t
 TransactionFrame::getFeeBid() const
 {
@@ -152,19 +160,19 @@ TransactionFrame::getFeeBid() const
 }
 
 int64_t
-TransactionFrame::getMinFee(LedgerHeader const& header) const
+TransactionFrame::getFee(LedgerHeader const& header,
+                         std::optional<int64_t> baseFee, bool applying) const
 {
-    return ((int64_t)header.baseFee) * std::max<int64_t>(1, getNumOperations());
-}
-
-int64_t
-TransactionFrame::getFee(LedgerHeader const& header, int64_t baseFee,
-                         bool applying) const
-{
-    if (header.ledgerVersion >= 11 || !applying)
+    if (!baseFee)
+    {
+        return getFeeBid();
+    }
+    if (protocolVersionStartsFrom(header.ledgerVersion,
+                                  ProtocolVersion::V_11) ||
+        !applying)
     {
         int64_t adjustedFee =
-            baseFee * std::max<int64_t>(1, getNumOperations());
+            *baseFee * std::max<int64_t>(1, getNumOperations());
 
         if (applying)
         {
@@ -224,13 +232,40 @@ TransactionFrame::checkSignatureNoAccount(SignatureChecker& signatureChecker,
     return signatureChecker.checkSignature(signers, 0);
 }
 
+bool
+TransactionFrame::checkExtraSigners(SignatureChecker& signatureChecker)
+{
+    ZoneScoped;
+    if (extraSignersExist())
+    {
+        auto const& extraSigners = mEnvelope.v1().tx.cond.v2().extraSigners;
+        std::vector<Signer> signers;
+
+        std::transform(extraSigners.begin(), extraSigners.end(),
+                       std::back_inserter(signers),
+                       [](SignerKey const& k) { return Signer(k, 1); });
+
+        // Sanity check for the int32 cast below
+        static_assert(decltype(PreconditionsV2::extraSigners)::max_size() <=
+                      INT32_MAX);
+
+        // We want to verify that there is a signature for each extraSigner, so
+        // we assign a weight of 1 to each key, and set the neededWeight to the
+        // number of extraSigners
+        return signatureChecker.checkSignature(
+            signers, static_cast<int32_t>(signers.size()));
+    }
+    return true;
+}
+
 LedgerTxnEntry
 TransactionFrame::loadSourceAccount(AbstractLedgerTxn& ltx,
                                     LedgerTxnHeader const& header)
 {
     ZoneScoped;
     auto res = loadAccount(ltx, header, getSourceID());
-    if (header.current().ledgerVersion < 8)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_8))
     {
         // this is buggy caching that existed in old versions of the protocol
         if (res)
@@ -252,7 +287,9 @@ TransactionFrame::loadAccount(AbstractLedgerTxn& ltx,
                               AccountID const& accountID)
 {
     ZoneScoped;
-    if (header.current().ledgerVersion < 8 && mCachedAccount &&
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_8) &&
+        mCachedAccount &&
         mCachedAccount->ledgerEntry().data.account().accountID == accountID)
     {
         // this is buggy caching that existed in old versions of the protocol
@@ -285,8 +322,8 @@ TransactionFrame::makeOperation(Operation const& op, OperationResult& res,
 }
 
 void
-TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee,
-                               bool applying)
+TransactionFrame::resetResults(LedgerHeader const& header,
+                               std::optional<int64_t> baseFee, bool applying)
 {
     auto& ops = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
                     ? mEnvelope.v0().tx.operations
@@ -310,19 +347,124 @@ TransactionFrame::resetResults(LedgerHeader const& header, int64_t baseFee,
     getResult().feeCharged = getFee(header, baseFee, applying);
 }
 
+std::optional<TimeBounds const> const
+TransactionFrame::getTimeBounds() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
+    {
+        return mEnvelope.v0().tx.timeBounds ? std::optional<TimeBounds const>(
+                                                  *mEnvelope.v0().tx.timeBounds)
+                                            : std::optional<TimeBounds const>();
+    }
+    else
+    {
+        auto const& cond = mEnvelope.v1().tx.cond;
+        switch (cond.type())
+        {
+        case PRECOND_NONE:
+        {
+            return std::optional<TimeBounds const>();
+        }
+        case PRECOND_TIME:
+        {
+            return std::optional<TimeBounds const>(cond.timeBounds());
+        }
+        case PRECOND_V2:
+        {
+            return cond.v2().timeBounds
+                       ? std::optional<TimeBounds const>(*cond.v2().timeBounds)
+                       : std::optional<TimeBounds const>();
+        }
+        default:
+            throw std::runtime_error("unknown condition type");
+        }
+    }
+}
+
+std::optional<LedgerBounds const> const
+TransactionFrame::getLedgerBounds() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX)
+    {
+        auto const& cond = mEnvelope.v1().tx.cond;
+        if (cond.type() == PRECOND_V2 && cond.v2().ledgerBounds)
+        {
+            return std::optional<LedgerBounds const>(*cond.v2().ledgerBounds);
+        }
+    }
+
+    return std::optional<LedgerBounds const>();
+}
+
+Duration
+TransactionFrame::getMinSeqAge() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX)
+    {
+        auto& cond = mEnvelope.v1().tx.cond;
+        return cond.type() == PRECOND_V2 ? cond.v2().minSeqAge : 0;
+    }
+
+    return 0;
+}
+
+uint32
+TransactionFrame::getMinSeqLedgerGap() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX)
+    {
+        auto& cond = mEnvelope.v1().tx.cond;
+        return cond.type() == PRECOND_V2 ? cond.v2().minSeqLedgerGap : 0;
+    }
+
+    return 0;
+}
+
+std::optional<SequenceNumber const> const
+TransactionFrame::getMinSeqNum() const
+{
+    if (mEnvelope.type() == ENVELOPE_TYPE_TX)
+    {
+        auto& cond = mEnvelope.v1().tx.cond;
+        if (cond.type() == PRECOND_V2 && cond.v2().minSeqNum)
+        {
+            return std::optional<SequenceNumber const>(*cond.v2().minSeqNum);
+        }
+    }
+
+    return std::optional<SequenceNumber const>();
+}
+
+bool
+TransactionFrame::extraSignersExist() const
+{
+    return mEnvelope.type() == ENVELOPE_TYPE_TX &&
+           mEnvelope.v1().tx.cond.type() == PRECOND_V2 &&
+           !mEnvelope.v1().tx.cond.v2().extraSigners.empty();
+}
+
 bool
 TransactionFrame::isTooEarly(LedgerTxnHeader const& header,
                              uint64_t lowerBoundCloseTimeOffset) const
 {
-    auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
-                         ? mEnvelope.v0().tx.timeBounds
-                         : mEnvelope.v1().tx.timeBounds;
+    auto const tb = getTimeBounds();
     if (tb)
     {
         uint64 closeTime = header.current().scpValue.closeTime;
-        return tb->minTime &&
-               (tb->minTime > (closeTime + lowerBoundCloseTimeOffset));
+        if (tb->minTime &&
+            (tb->minTime > (closeTime + lowerBoundCloseTimeOffset)))
+        {
+            return true;
+        }
     }
+
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_19))
+    {
+        auto const lb = getLedgerBounds();
+        return lb && lb->minLedger > header.current().ledgerSeq;
+    }
+
     return false;
 }
 
@@ -330,18 +472,71 @@ bool
 TransactionFrame::isTooLate(LedgerTxnHeader const& header,
                             uint64_t upperBoundCloseTimeOffset) const
 {
-    auto const& tb = mEnvelope.type() == ENVELOPE_TYPE_TX_V0
-                         ? mEnvelope.v0().tx.timeBounds
-                         : mEnvelope.v1().tx.timeBounds;
+    auto const tb = getTimeBounds();
     if (tb)
     {
         // Prior to consensus, we can pass in an upper bound estimate on when we
         // expect the ledger to close so we don't accept transactions that will
         // expire by the time they are applied
         uint64 closeTime = header.current().scpValue.closeTime;
-        return tb->maxTime &&
-               (tb->maxTime < (closeTime + upperBoundCloseTimeOffset));
+        if (tb->maxTime &&
+            (tb->maxTime < (closeTime + upperBoundCloseTimeOffset)))
+        {
+            return true;
+        }
     }
+
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_19))
+    {
+        auto const lb = getLedgerBounds();
+        return lb && lb->maxLedger != 0 &&
+               lb->maxLedger <= header.current().ledgerSeq;
+    }
+    return false;
+}
+
+bool
+TransactionFrame::isTooEarlyForAccount(LedgerTxnHeader const& header,
+                                       LedgerTxnEntry const& sourceAccount,
+                                       uint64_t lowerBoundCloseTimeOffset) const
+{
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_19))
+    {
+        return false;
+    }
+
+    auto accountEntry = [&]() -> AccountEntry const& {
+        return sourceAccount.current().data.account();
+    };
+
+    auto accSeqTime = hasAccountEntryExtV3(accountEntry())
+                          ? getAccountEntryExtensionV3(accountEntry()).seqTime
+                          : 0;
+    auto minSeqAge = getMinSeqAge();
+
+    auto lowerBoundCloseTime =
+        header.current().scpValue.closeTime + lowerBoundCloseTimeOffset;
+    if (minSeqAge > lowerBoundCloseTime ||
+        lowerBoundCloseTime - minSeqAge < accSeqTime)
+    {
+        return true;
+    }
+
+    auto accSeqLedger =
+        hasAccountEntryExtV3(accountEntry())
+            ? getAccountEntryExtensionV3(accountEntry()).seqLedger
+            : 0;
+    auto minSeqLedgerGap = getMinSeqLedgerGap();
+
+    auto ledgerSeq = header.current().ledgerSeq;
+    if (minSeqLedgerGap > ledgerSeq ||
+        ledgerSeq - minSeqLedgerGap < accSeqLedger)
+    {
+        return true;
+    }
+
     return false;
 }
 
@@ -355,12 +550,44 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee,
     //    (stay true regardless of other side effects)
     auto header = ltx.loadHeader();
     uint32_t ledgerVersion = header.current().ledgerVersion;
-    if ((ledgerVersion < 13 && (mEnvelope.type() == ENVELOPE_TYPE_TX ||
-                                hasMuxedAccount(mEnvelope))) ||
-        (ledgerVersion >= 13 && mEnvelope.type() == ENVELOPE_TYPE_TX_V0))
+    if ((protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_13) &&
+         (mEnvelope.type() == ENVELOPE_TYPE_TX ||
+          hasMuxedAccount(mEnvelope))) ||
+        (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_13) &&
+         mEnvelope.type() == ENVELOPE_TYPE_TX_V0))
     {
         getResult().result.code(txNOT_SUPPORTED);
         return false;
+    }
+
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_19) &&
+        mEnvelope.type() == ENVELOPE_TYPE_TX &&
+        mEnvelope.v1().tx.cond.type() == PRECOND_V2)
+    {
+        getResult().result.code(txNOT_SUPPORTED);
+        return false;
+    }
+
+    if (extraSignersExist())
+    {
+        auto const& extraSigners = mEnvelope.v1().tx.cond.v2().extraSigners;
+
+        static_assert(decltype(PreconditionsV2::extraSigners)::max_size() == 2);
+        if (extraSigners.size() == 2 && extraSigners[0] == extraSigners[1])
+        {
+            getResult().result.code(txMALFORMED);
+            return false;
+        }
+
+        for (auto const& signer : extraSigners)
+        {
+            if (signer.type() == SIGNER_KEY_TYPE_ED25519_SIGNED_PAYLOAD &&
+                signer.ed25519SignedPayload().payload.empty())
+            {
+                getResult().result.code(txMALFORMED);
+                return false;
+            }
+        }
     }
 
     if (getNumOperations() == 0)
@@ -380,7 +607,7 @@ TransactionFrame::commonValidPreSeqNum(AbstractLedgerTxn& ltx, bool chargeFee,
         return false;
     }
 
-    if (chargeFee && getFeeBid() < getMinFee(header.current()))
+    if (chargeFee && getFeeBid() < getMinFee(*this, header.current()))
     {
         getResult().result.code(txINSUFFICIENT_FEE);
         return false;
@@ -405,7 +632,8 @@ TransactionFrame::processSeqNum(AbstractLedgerTxn& ltx)
 {
     ZoneScoped;
     auto header = ltx.loadHeader();
-    if (header.current().ledgerVersion >= 10)
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_10))
     {
         auto sourceAccount = loadSourceAccount(ltx, header);
         if (sourceAccount.current().data.account().seqNum > getSeqNum())
@@ -413,6 +641,8 @@ TransactionFrame::processSeqNum(AbstractLedgerTxn& ltx)
             throw std::runtime_error("unexpected sequence number");
         }
         sourceAccount.current().data.account().seqNum = getSeqNum();
+
+        maybeUpdateAccountOnLedgerSeqUpdate(header, sourceAccount);
     }
 }
 
@@ -424,19 +654,21 @@ TransactionFrame::processSignatures(ValidationType cv,
     ZoneScoped;
     bool maybeValid = (cv == ValidationType::kMaybeValid);
     uint32_t ledgerVersion = ltxOuter.loadHeader().current().ledgerVersion;
-    if (ledgerVersion < 10)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_10))
     {
         return maybeValid;
     }
 
     // check if we need to fast fail and use the original error code
-    if (ledgerVersion >= 13 && !maybeValid)
+    if (protocolVersionStartsFrom(ledgerVersion, ProtocolVersion::V_13) &&
+        !maybeValid)
     {
         removeOneTimeSignerFromAllSourceAccounts(ltxOuter);
         return false;
     }
     // older versions of the protocol only fast fail in a subset of cases
-    if (ledgerVersion < 13 && cv < ValidationType::kInvalidPostAuth)
+    if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_13) &&
+        cv < ValidationType::kInvalidPostAuth)
     {
         return false;
     }
@@ -472,8 +704,28 @@ TransactionFrame::processSignatures(ValidationType cv,
 }
 
 bool
-TransactionFrame::isBadSeq(int64_t seqNum) const
+TransactionFrame::isBadSeq(LedgerTxnHeader const& header, int64_t seqNum) const
 {
+    if (getSeqNum() == getStartingSequenceNumber(header))
+    {
+        return true;
+    }
+
+    // If seqNum == INT64_MAX, seqNum >= getSeqNum() is guaranteed to be true
+    // because SequenceNumber is int64, so isBadSeq will always return true in
+    // that case.
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_19))
+    {
+        // Check if we need to relax sequence number checking
+        auto minSeqNum = getMinSeqNum();
+        if (minSeqNum)
+        {
+            return seqNum < *minSeqNum || seqNum >= getSeqNum();
+        }
+    }
+
+    // If we get here, we need to do the strict seqnum check
     return seqNum == INT64_MAX || seqNum + 1 != getSeqNum();
 }
 
@@ -507,13 +759,15 @@ TransactionFrame::commonValid(SignatureChecker& signatureChecker,
 
     // in older versions, the account's sequence number is updated when taking
     // fees
-    if (header.current().ledgerVersion >= 10 || !applying)
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_10) ||
+        !applying)
     {
         if (current == 0)
         {
             current = sourceAccount.current().data.account().seqNum;
         }
-        if (isBadSeq(current))
+        if (isBadSeq(header, current))
         {
             getResult().result.code(txBAD_SEQ);
             return res;
@@ -522,9 +776,23 @@ TransactionFrame::commonValid(SignatureChecker& signatureChecker,
 
     res = ValidationType::kInvalidUpdateSeqNum;
 
+    if (isTooEarlyForAccount(header, sourceAccount, lowerBoundCloseTimeOffset))
+    {
+        getResult().result.code(txBAD_MIN_SEQ_AGE_OR_GAP);
+        return res;
+    }
+
     if (!checkSignature(
             signatureChecker, sourceAccount,
             sourceAccount.current().data.account().thresholds[THRESHOLD_LOW]))
+    {
+        getResult().result.code(txBAD_AUTH);
+        return res;
+    }
+
+    if (protocolVersionStartsFrom(header.current().ledgerVersion,
+                                  ProtocolVersion::V_19) &&
+        !checkExtraSigners(signatureChecker))
     {
         getResult().result.code(txBAD_AUTH);
         return res;
@@ -535,9 +803,11 @@ TransactionFrame::commonValid(SignatureChecker& signatureChecker,
     // if we are in applying mode fee was already deduced from signing account
     // balance, if not, we need to check if after that deduction this account
     // will still have minimum balance
-    uint32_t feeToPay = (applying && (header.current().ledgerVersion > 8))
-                            ? 0
-                            : static_cast<uint32_t>(getFeeBid());
+    uint32_t feeToPay =
+        (applying && protocolVersionStartsFrom(header.current().ledgerVersion,
+                                               ProtocolVersion::V_9))
+            ? 0
+            : static_cast<uint32_t>(getFeeBid());
     // don't let the account go below the reserve after accounting for
     // liabilities
     if (chargeFee && getAvailableBalance(header, sourceAccount) < feeToPay)
@@ -550,7 +820,8 @@ TransactionFrame::commonValid(SignatureChecker& signatureChecker,
 }
 
 void
-TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
+TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx,
+                                   std::optional<int64_t> baseFee)
 {
     ZoneScoped;
     mCachedAccount.reset();
@@ -563,6 +834,7 @@ TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
     {
         throw std::runtime_error("Unexpected database state");
     }
+
     auto& acc = sourceAccount.current().data.account();
 
     int64_t& fee = getResult().feeCharged;
@@ -576,7 +848,8 @@ TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee)
         header.current().feePool += fee;
     }
     // in v10 we update sequence numbers during apply
-    if (header.current().ledgerVersion <= 9)
+    if (protocolVersionIsBefore(header.current().ledgerVersion,
+                                ProtocolVersion::V_10))
     {
         if (acc.seqNum + 1 != getSeqNum())
         {
@@ -637,16 +910,19 @@ TransactionFrame::removeAccountSigner(AbstractLedgerTxn& ltxOuter,
 }
 
 bool
-TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
-                             SequenceNumber current, bool chargeFee,
-                             uint64_t lowerBoundCloseTimeOffset,
-                             uint64_t upperBoundCloseTimeOffset)
+TransactionFrame::checkValidWithOptionallyChargedFee(
+    AbstractLedgerTxn& ltxOuter, SequenceNumber current, bool chargeFee,
+    uint64_t lowerBoundCloseTimeOffset, uint64_t upperBoundCloseTimeOffset)
 {
     ZoneScoped;
     mCachedAccount.reset();
 
     LedgerTxn ltx(ltxOuter);
-    int64_t minBaseFee = chargeFee ? ltx.loadHeader().current().baseFee : 0;
+    int64_t minBaseFee = ltx.loadHeader().current().baseFee;
+    if (!chargeFee)
+    {
+        minBaseFee = 0;
+    }
     resetResults(ltx.loadHeader().current(), minBaseFee, false);
 
     SignatureChecker signatureChecker{ltx.loadHeader().current().ledgerVersion,
@@ -685,8 +961,9 @@ TransactionFrame::checkValid(AbstractLedgerTxn& ltxOuter,
                              uint64_t lowerBoundCloseTimeOffset,
                              uint64_t upperBoundCloseTimeOffset)
 {
-    return checkValid(ltxOuter, current, true, lowerBoundCloseTimeOffset,
-                      upperBoundCloseTimeOffset);
+    return checkValidWithOptionallyChargedFee(ltxOuter, current, true,
+                                              lowerBoundCloseTimeOffset,
+                                              upperBoundCloseTimeOffset);
 }
 
 void
@@ -731,6 +1008,9 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                                   TransactionMeta& outerMeta)
 {
     ZoneScoped;
+    auto& internalErrorCounter = app.getMetrics().NewCounter(
+        {"ledger", "transaction", "internal-error"});
+    bool reportInternalErrOnException = true;
     try
     {
         bool success = true;
@@ -741,7 +1021,12 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
         // shield outer scope of any side effects with LedgerTxn
         LedgerTxn ltxTx(ltx);
         uint32_t ledgerVersion = ltxTx.loadHeader().current().ledgerVersion;
-
+        // We do not want to increase the internal-error metric count for older
+        // ledger versions. The minimum ledger version for which we start
+        // internal-error counting is defined in the app config.
+        reportInternalErrOnException =
+            ledgerVersion >=
+            app.getConfig().LEDGER_PROTOCOL_MIN_VERSION_INTERNAL_ERROR_REPORT;
         auto& opTimer =
             app.getMetrics().NewTimer({"ledger", "operation", "apply"});
         for (auto& op : mOperations)
@@ -764,7 +1049,8 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                 newMeta.v2().operations.emplace_back(ltxOp.getChanges());
             }
 
-            if (txRes || ledgerVersion < 14)
+            if (txRes ||
+                protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_14))
             {
                 ltxOp.commit();
             }
@@ -772,7 +1058,7 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
 
         if (success)
         {
-            if (ledgerVersion < 10)
+            if (protocolVersionIsBefore(ledgerVersion, ProtocolVersion::V_10))
             {
                 if (!signatureChecker.checkAllSignaturesUsed())
                 {
@@ -789,7 +1075,9 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
                 newMeta.v2().txChangesAfter = ltxAfter.getChanges();
                 ltxAfter.commit();
             }
-            else if (ledgerVersion >= 14 && ltxTx.hasSponsorshipEntry())
+            else if (protocolVersionStartsFrom(ledgerVersion,
+                                               ProtocolVersion::V_14) &&
+                     ltxTx.hasSponsorshipEntry())
             {
                 getResult().result.code(txBAD_SPONSORSHIP);
                 return false;
@@ -807,9 +1095,10 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
         }
         return success;
     }
-    catch (InvariantDoesNotHold&)
+    catch (InvariantDoesNotHold& e)
     {
-        printErrorAndAbort("Invariant failure while applying operations");
+        printErrorAndAbort("Invariant failure while applying operations: ",
+                           e.what());
     }
     catch (std::bad_alloc& e)
     {
@@ -817,22 +1106,55 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
     }
     catch (std::exception& e)
     {
-        CLOG_ERROR(Tx, "Exception while applying operations ({}, {}): {}",
-                   xdr_to_string(getFullHash(), "fullHash"),
-                   xdr_to_string(getContentsHash(), "contentsHash"), e.what());
+        if (reportInternalErrOnException)
+        {
+            CLOG_ERROR(Tx, "Exception while applying operations ({}, {}): {}",
+                       xdr_to_string(getFullHash(), "fullHash"),
+                       xdr_to_string(getContentsHash(), "contentsHash"),
+                       e.what());
+        }
+        else
+        {
+            CLOG_INFO(Tx,
+                      "Exception occurred on outdated protocol version "
+                      "while applying operations ({}, {}): {}",
+                      xdr_to_string(getFullHash(), "fullHash"),
+                      xdr_to_string(getContentsHash(), "contentsHash"),
+                      e.what());
+        }
     }
     catch (...)
     {
-        CLOG_ERROR(Tx, "Unknown exception while applying operations ({}, {})",
-                   xdr_to_string(getFullHash(), "fullHash"),
-                   xdr_to_string(getContentsHash(), "contentsHash"));
+        if (reportInternalErrOnException)
+        {
+            CLOG_ERROR(Tx,
+                       "Unknown exception while applying operations ({}, {})",
+                       xdr_to_string(getFullHash(), "fullHash"),
+                       xdr_to_string(getContentsHash(), "contentsHash"));
+        }
+        else
+        {
+            CLOG_INFO(Tx,
+                      "Unknown exception on outdated protocol version "
+                      "while applying operations ({}, {})",
+                      xdr_to_string(getFullHash(), "fullHash"),
+                      xdr_to_string(getContentsHash(), "contentsHash"));
+        }
+    }
+    if (app.getConfig().HALT_ON_INTERNAL_TRANSACTION_ERROR)
+    {
+        printErrorAndAbort("Encountered an exception while applying "
+                           "operations, see logs for details.");
     }
     // This is only reachable if an exception is thrown
     getResult().result.code(txINTERNAL_ERROR);
 
-    auto& internalErrorCounter = app.getMetrics().NewCounter(
-        {"ledger", "transaction", "internal-error"});
-    internalErrorCounter.inc();
+    // We only increase the internal-error metric count if the ledger is a newer
+    // version.
+    if (reportInternalErrOnException)
+    {
+        internalErrorCounter.inc();
+    }
 
     // operations and txChangesAfter should already be empty at this point
     outerMeta.v2().operations.clear();

@@ -45,20 +45,18 @@ testQuorumTracker()
     auto clock = std::make_shared<VirtualClock>();
     Application::pointer app = createTestApplication(*clock, cfg);
 
-    app->start();
-
     auto* herder = static_cast<HerderImpl*>(&app->getHerder());
     auto* penEnvs = &herder->getPendingEnvelopes();
 
     // allow SCP messages from other slots to be processed
-    herder->getHerderSCPDriver().lostSync();
+    herder->lostSync();
 
     auto valSigner = SecretKey::pseudoRandomForTesting();
 
     struct ValuesTxSet
     {
         Value mSignedV;
-        TxSetFramePtr mTxSet;
+        TxSetFrameConstPtr mTxSet;
     };
 
     auto recvEnvelope = [&](SCPEnvelope envelope, uint64 slotID,
@@ -75,7 +73,7 @@ testQuorumTracker()
         herder->recvSCPQuorumSet(qSetH, qSet);
         for (auto& p : pp)
         {
-            herder->recvTxSet(p.mTxSet->getContentsHash(), *p.mTxSet);
+            herder->recvTxSet(p.mTxSet->getContentsHash(), p.mTxSet);
         }
     };
     auto recvNom = [&](uint64 slotID, SecretKey const& k,
@@ -111,7 +109,7 @@ testQuorumTracker()
     };
     auto makeValue = [&](int i) {
         auto const& lcl = app->getLedgerManager().getLastClosedLedgerHeader();
-        auto txSet = std::make_shared<TxSetFrame>(lcl.hash);
+        auto txSet = TxSetFrame::makeEmpty(lcl);
         StellarValue sv = herder->makeStellarValue(
             txSet->getContentsHash(), lcl.header.scpValue.closeTime + i,
             emptyUpgradeSteps, valSigner);
@@ -215,7 +213,6 @@ TEST_CASE("quorum tracker closest validators", "[quorum][herder]")
 
     auto clock = std::make_shared<VirtualClock>();
     Application::pointer app = createTestApplication(*clock, cfg);
-    app->start();
 
     auto* herder = static_cast<HerderImpl*>(&app->getHerder());
     auto const localNodeID = herder->getSCP().getLocalNodeID();

@@ -54,28 +54,23 @@ enum class PaymentValidity
 };
 }
 
-TEST_CASE("txresults", "[tx][txresults]")
+TEST_CASE_VERSIONS("txresults", "[tx][txresults]")
 {
     auto const& cfg = getTestConfig();
 
     VirtualClock clock;
     auto app = createTestApplication(clock, cfg);
-    app->start();
 
     auto& lm = app->getLedgerManager();
     const int64_t baseReserve = lm.getLastReserve();
     const int64_t baseFee = lm.getLastTxFee();
     const int64_t startAmount = baseReserve * 100;
 
-    {
-        LedgerTxn ltx(app->getLedgerTxnRoot());
-        ltx.loadHeader().current().scpValue.closeTime = 10;
-        ltx.commit();
-    }
+    closeLedgerOn(*app, 1, 1, 2016);
 
     auto getCloseTime = [&] {
         LedgerTxn ltx(app->getLedgerTxnRoot());
-        return ltx.loadHeader().current().scpValue.closeTime;
+        return lm.getLastClosedLedgerHeader().header.scpValue.closeTime;
     };
 
     // set up world
@@ -118,7 +113,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent fee")
+            SECTION("insufficient fee")
             {
                 for_all_versions(*app, [&] {
                     auto tx = a.tx({payment(root, 1)});
@@ -144,7 +139,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent balance")
+            SECTION("insufficient balance")
             {
                 for_all_versions(*app, [&] {
                     auto tx = g.tx({payment(root, 1)});
@@ -185,7 +180,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent fee")
+            SECTION("insufficient fee")
             {
                 for_all_versions(*app, [&] {
                     auto tx = a.tx({payment(root, 1)});
@@ -214,7 +209,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent balance")
+            SECTION("insufficient balance")
             {
                 for_versions_to(6, *app, [&] {
                     auto tx = g.tx({payment(root, 1)});
@@ -266,7 +261,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent fee")
+            SECTION("insufficient fee")
             {
                 for_all_versions(*app, [&] {
                     auto tx = a.tx({payment(root, 1)});
@@ -295,7 +290,7 @@ TEST_CASE("txresults", "[tx][txresults]")
                 });
             }
 
-            SECTION("insufficent balance")
+            SECTION("insufficient balance")
             {
                 for_all_versions(*app, [&] {
                     auto tx = g.tx({payment(root, 1)});
@@ -309,7 +304,6 @@ TEST_CASE("txresults", "[tx][txresults]")
 
     SECTION("merge account")
     {
-        closeLedgerOn(*app, 2, 1, 1, 2016);
         SECTION("normal")
         {
             auto applyResult = expectedResult(

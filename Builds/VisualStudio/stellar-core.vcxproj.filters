@@ -73,17 +73,11 @@
     <Filter Include="bucket\tests">
       <UniqueIdentifier>{86be4089-9cdf-49d8-9d3f-4f8712a6560c}</UniqueIdentifier>
     </Filter>
-    <Filter Include="herder\tests">
-      <UniqueIdentifier>{eda15f5e-847b-4167-93ae-e508b7fc009b}</UniqueIdentifier>
-    </Filter>
     <Filter Include="scp">
       <UniqueIdentifier>{0cf920e3-5232-4c4e-8b79-25ec2c8f86ce}</UniqueIdentifier>
     </Filter>
     <Filter Include="herder\docs">
       <UniqueIdentifier>{aa45d521-588a-4f8f-b737-d3667c7d9404}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="xdr\generated">
-      <UniqueIdentifier>{02035318-e72a-43b0-a250-8b3af9fb4bbf}</UniqueIdentifier>
     </Filter>
     <Filter Include="scp\tests">
       <UniqueIdentifier>{34037c6d-2c07-471b-8dde-6b69003d4ca7}</UniqueIdentifier>
@@ -160,6 +154,30 @@
     <Filter Include="lib\spdlog">
       <UniqueIdentifier>{f296b651-5074-4b3c-9fec-1df4233f2fec}</UniqueIdentifier>
     </Filter>
+    <Filter Include="rust">
+      <UniqueIdentifier>{e85a896a-28e3-423b-b896-d7df4e8b8907}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="xdr\next">
+      <UniqueIdentifier>{9a05704b-1f74-41a9-9fdb-7e76d91e0f7b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="xdr\curr">
+      <UniqueIdentifier>{452dffd8-d0b1-4918-a8a5-f06e09b5b90f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="xdr\generated">
+      <UniqueIdentifier>{f6858776-c67a-4dff-8084-cf87fa4c55df}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="rust\generated">
+      <UniqueIdentifier>{57d45a48-6030-4dff-96ce-fd587f319529}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="herder\test">
+      <UniqueIdentifier>{eda15f5e-847b-4167-93ae-e508b7fc009b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="util\xdrquery">
+      <UniqueIdentifier>{166a403b-4f13-4505-9953-97ea92e5d855}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="util\xdrquery\tests">
+      <UniqueIdentifier>{60ef25c4-d908-4795-83cf-a348673fe4c4}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\lib\util\getopt_long.c">
@@ -231,9 +249,6 @@
     <ClCompile Include="..\..\lib\asio.cpp">
       <Filter>lib</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\lib\util\uint128_t.cpp">
-      <Filter>lib\util</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\src\util\TmpDir.cpp">
       <Filter>util</Filter>
     </ClCompile>
@@ -250,6 +265,9 @@
       <Filter>main</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\simulation\Topologies.cpp">
+      <Filter>simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\simulation\test\LoadGeneratorTests.cpp">
       <Filter>simulation</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\scp\SCP.cpp">
@@ -300,6 +318,9 @@
     <ClCompile Include="..\..\src\work\WorkSequence.cpp">
       <Filter>work</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\work\WorkWithCallback.cpp">
+      <Filter>work</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\util\StatusManager.cpp">
       <Filter>util</Filter>
     </ClCompile>
@@ -331,6 +352,9 @@
       <Filter>invariant</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\invariant\ConservationOfLumens.cpp">
+      <Filter>invariant</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\invariant\ConstantProductInvariant.cpp">
       <Filter>invariant</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\invariant\InvariantManagerImpl.cpp">
@@ -549,6 +573,9 @@
     <ClCompile Include="..\..\src\ledger\CheckpointRange.cpp">
       <Filter>ledger</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\ledger\FlushAndRotateMetaDebugWork.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\ledger\LedgerHeaderUtils.cpp">
       <Filter>ledger</Filter>
     </ClCompile>
@@ -631,16 +658,16 @@
       <Filter>database\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\test\HerderTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\test\PendingEnvelopesTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\test\TransactionQueueTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\test\UpgradesTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\history\test\HistoryTests.cpp">
       <Filter>history\tests</Filter>
@@ -690,6 +717,9 @@
     <ClCompile Include="..\..\src\ledger\test\LiabilitiesTests.cpp">
       <Filter>ledger\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\main\test\ApplicationUtilsTests.cpp">
+      <Filter>main\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\main\test\CommandHandlerTests.cpp">
       <Filter>main\tests</Filter>
     </ClCompile>
@@ -697,6 +727,9 @@
       <Filter>main\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\main\test\ExternalQueueTests.cpp">
+      <Filter>main\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\main\test\SelfCheckTests.cpp">
       <Filter>main\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\util\test\CacheTests.cpp">
@@ -753,6 +786,9 @@
     <ClCompile Include="..\..\src\test\TxTests.cpp">
       <Filter>test</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\util\TarjanSCCCalculator.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\util\Thread.cpp">
       <Filter>util</Filter>
     </ClCompile>
@@ -793,6 +829,15 @@
       <Filter>transactions\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\transactions\test\SetTrustLineFlagsTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\LiquidityPoolDepositTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\LiquidityPoolWithdrawTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\LiquidityPoolTradeTests.cpp">
       <Filter>transactions\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\transactions\test\SignatureUtilsTest.cpp">
@@ -850,6 +895,12 @@
       <Filter>transactions</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\transactions\SetTrustLineFlagsOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\LiquidityPoolDepositOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\LiquidityPoolWithdrawOpFrame.cpp">
       <Filter>transactions</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\transactions\SignatureChecker.cpp">
@@ -930,8 +981,11 @@
     <ClCompile Include="..\..\src\overlay\Tracker.cpp">
       <Filter>overlay</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\overlay\TxAdvertQueue.cpp">
+      <Filter>overlay</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\herder\test\QuorumTrackerTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\QuorumTracker.cpp">
       <Filter>herder</Filter>
@@ -952,7 +1006,7 @@
       <Filter>util\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\test\QuorumIntersectionTests.cpp">
-      <Filter>herder\tests</Filter>
+      <Filter>herder\test</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\herder\QuorumIntersectionCheckerImpl.cpp">
       <Filter>herder</Filter>
@@ -1000,6 +1054,9 @@
       <Filter>catchup</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\ledger\InMemoryLedgerTxnRoot.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\InMemoryLedgerTxn.cpp">
       <Filter>ledger</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\ledger\test\LedgerCloseMetaStreamTests.cpp">
@@ -1170,6 +1227,67 @@
     <ClCompile Include="..\..\src\herder\SurgePricingUtils.cpp">
       <Filter>herder</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\historywork\CheckSingleLedgerHeaderWork.cpp">
+      <Filter>historyWork</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\LedgerTxnLiquidityPoolSQL.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\LedgerTxnConfigSettingSQL.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\LedgerTxnContractDataSQL.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\main\Diagnostics.cpp">
+      <Filter>main</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\RandHasher.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\TrustFlagsOpFrameBase.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\ProtocolVersion.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="src\$(Configuration)\generated\rust\RustBridge.cpp">
+      <Filter>rust\generated</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\LedgerCloseMetaFrame.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\herder\test\TxSetTests.cpp">
+      <Filter>herder\test</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\herder\TxSetUtils.cpp">
+      <Filter>herder</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\herder\test\TestTxSetUtils.cpp">
+      <Filter>herder\test</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\xdrquery\XDRQuery.cpp">
+      <Filter>util\xdrquery</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\xdrquery\XDRQueryEval.cpp">
+      <Filter>util\xdrquery</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\xdrquery\XDRQueryParser.cpp">
+      <Filter>util\xdrquery</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\xdrquery\XDRQueryScanner.cpp">
+      <Filter>util\xdrquery</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\xdrquery\test\XDRQueryTests.cpp">
+      <Filter>util\xdrquery\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\InvokeHostFunctionOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\overlay\test\TxAdvertQueueTests.cpp">
+      <Filter>overlay\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="src\$(Configuration)\generated\xdr\XDRFilesSha256.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\lib\util\cpptoml.h">
@@ -1292,24 +1410,6 @@
     <ClInclude Include="..\..\lib\util\basen.h">
       <Filter>util</Filter>
     </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-ledger.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-ledger-entries.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-overlay.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-SCP.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-transaction.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
-    <ClInclude Include="src\generated\xdr\Stellar-types.h">
-      <Filter>xdr\generated</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\lib\catch.hpp">
       <Filter>lib</Filter>
     </ClInclude>
@@ -1328,6 +1428,9 @@
     <ClInclude Include="..\..\src\work\WorkSequence.h">
       <Filter>work</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\work\WorkWithCallback.h">
+      <Filter>work</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\util\StatusManager.h">
       <Filter>util</Filter>
     </ClInclude>
@@ -1340,7 +1443,7 @@
     <ClInclude Include="..\..\src\test\TestUtils.h">
       <Filter>test</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\src\util\Algoritm.h">
+    <ClInclude Include="..\..\src\util\Algorithm.h">
       <Filter>util</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\util\SecretValue.h">
@@ -1365,6 +1468,9 @@
       <Filter>invariant</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\invariant\ConservationOfLumens.h">
+      <Filter>invariant</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\invariant\ConstantProductInvariant.h">
       <Filter>invariant</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\invariant\Invariant.h">
@@ -1616,6 +1722,9 @@
     <ClInclude Include="..\..\src\ledger\CheckpointRange.h">
       <Filter>ledger</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\ledger\FlushAndRotateMetaDebugWork.h">
+      <Filter>ledger</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\ledger\LedgerHashUtils.h">
       <Filter>ledger</Filter>
     </ClInclude>
@@ -1709,6 +1818,9 @@
     <ClInclude Include="..\..\src\test\TxTests.h">
       <Filter>test</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\util\TarjanSCCCalculator.h">
+      <Filter>util</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\util\Thread.h">
       <Filter>util</Filter>
     </ClInclude>
@@ -1761,6 +1873,12 @@
       <Filter>transactions</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\transactions\SetTrustLineFlagsOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\LiquidityPoolDepositOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\LiquidityPoolWithdrawOpFrame.h">
       <Filter>transactions</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\transactions\SignatureChecker.h">
@@ -1829,6 +1947,9 @@
     <ClInclude Include="..\..\src\overlay\Tracker.h">
       <Filter>overlay</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\overlay\TxAdvertQueue.h">
+      <Filter>overlay</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\herder\QuorumTracker.h">
       <Filter>herder</Filter>
     </ClInclude>
@@ -1881,6 +2002,9 @@
       <Filter>catchup</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\ledger\InMemoryLedgerTxnRoot.h">
+      <Filter>ledger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\ledger\InMemoryLedgerTxn.h">
       <Filter>ledger</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\crypto\Curve25519.h">
@@ -2039,6 +2163,84 @@
     <ClInclude Include="..\..\src\herder\SurgePricingUtils.h">
       <Filter>herder</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\historywork\CheckSingleLedgerHeaderWork.h">
+      <Filter>historyWork</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\main\Diagnostics.h">
+      <Filter>main</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\numeric128.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\util\stdrandom.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\TrustFlagsOpFrameBase.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\ProtocolVersion.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\rust\RustBridge.h">
+      <Filter>rust\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\ledger\LedgerCloseMetaFrame.h">
+      <Filter>ledger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\herder\TxSetUtils.h">
+      <Filter>herder</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\herder\test\TestTxSetUtils.h">
+      <Filter>herder\test</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\rust\CppShims.h">
+      <Filter>rust</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\rust\RustVecXdrMarshal.h">
+      <Filter>rust</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-contract.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-ledger.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-ledger-entries.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-overlay.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-SCP.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-transaction.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-types.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="src\$(Configuration)\generated\xdr\Stellar-internal.h">
+      <Filter>xdr\generated</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\xdrquery\XDRQuery.h">
+      <Filter>util\xdrquery</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\xdrquery\XDRFieldResolver.h">
+      <Filter>util\xdrquery</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\xdrquery\XDRQueryEval.h">
+      <Filter>util\xdrquery</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\xdrquery\XDRQueryError.h">
+      <Filter>util\xdrquery</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\xdrquery\XDRQueryParser.h">
+      <Filter>util\xdrquery</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\InvokeHostFunctionOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\AUTHORS" />
@@ -2177,29 +2379,75 @@
     <None Include="..\..\docs\stellar-core_testnet_validator.cfg">
       <Filter>docs</Filter>
     </None>
+    <None Include="..\..\docs\software\ledger_query_examples.md">
+      <Filter>docs\software</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="..\..\src\xdr\Stellar-ledger.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-contract.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\src\xdr\Stellar-transaction.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-ledger.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\src\xdr\Stellar-types.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-transaction.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\src\xdr\Stellar-overlay.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-types.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\src\xdr\Stellar-ledger-entries.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-overlay.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
-    <CustomBuild Include="..\..\src\xdr\Stellar-SCP.x">
-      <Filter>xdr</Filter>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-ledger-entries.x">
+      <Filter>xdr\next</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-SCP.x">
+      <Filter>xdr\next</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-next\xdr\Stellar-internal.x">
+      <Filter>xdr\next</Filter>
     </CustomBuild>
     <CustomBuild Include="..\..\src\main\StellarCoreVersion.cpp.in">
       <Filter>main</Filter>
     </CustomBuild>
+    <CustomBuild Include="..\..\src\rust\Cargo.toml">
+      <Filter>rust</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\rust\src\lib.rs">
+      <Filter>rust</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\rust\install-cxxbridge-cmd">
+      <Filter>rust</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-ledger.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-transaction.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-types.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-overlay.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-ledger-entries.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-SCP.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\protocol-curr\xdr\Stellar-internal.x">
+      <Filter>xdr\curr</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\util\xdrquery\XDRQueryParser.yy">
+      <Filter>util\xdrquery</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\src\util\xdrquery\XDRQueryScanner.ll">
+      <Filter>util\xdrquery</Filter>
+    </CustomBuild>
+    <CustomBuild Include="..\..\hash-xdrs.sh" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="..\..\INSTALL-Windows.md" />

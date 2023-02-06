@@ -9,6 +9,7 @@
 #include "crypto/Hex.h"
 #include "crypto/KeyUtils.h"
 #include "crypto/SecretKey.h"
+#include "util/GlobalChecks.h"
 #include "xdrpp/marshal.h"
 
 namespace stellar
@@ -18,7 +19,7 @@ bool
 WrappedValuePtrComparator::operator()(ValueWrapperPtr const& l,
                                       ValueWrapperPtr const& r) const
 {
-    assert(l && r);
+    releaseAssert(l && r);
     return l->getValue() < r->getValue();
 }
 
@@ -61,13 +62,13 @@ SCPDriver::getValueString(Value const& v) const
 }
 
 std::string
-SCPDriver::toStrKey(PublicKey const& pk, bool fullKey) const
+SCPDriver::toStrKey(NodeID const& pk, bool fullKey) const
 {
     return fullKey ? KeyUtils::toStrKey(pk) : toShortString(pk);
 }
 
 std::string
-SCPDriver::toShortString(PublicKey const& pk) const
+SCPDriver::toShortString(NodeID const& pk) const
 {
     return KeyUtils::toShortString(pk);
 }

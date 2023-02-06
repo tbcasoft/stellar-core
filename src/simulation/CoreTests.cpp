@@ -13,6 +13,7 @@
 #include "ledger/LedgerManager.h"
 #include "ledger/test/LedgerTestUtils.h"
 #include "lib/catch.hpp"
+#include "lib/util/stdrandom.h"
 #include "main/Application.h"
 #include "medida/stats/snapshot.h"
 #include "overlay/StellarXDR.h"
@@ -104,7 +105,7 @@ TEST_CASE("3 nodes 2 running threshold 2", "[simulation][core3][acceptance]")
     LOG_DEBUG(DEFAULT_LOG, "done with core3 test");
 }
 
-TEST_CASE("assymetric topology report cost", "[simulation][!hide]")
+TEST_CASE("asymmetric topology report cost", "[simulation][!hide]")
 {
     // Ensure we close enough ledgers to start purging slots
     // (which is when cost gets reported)
@@ -112,7 +113,7 @@ TEST_CASE("assymetric topology report cost", "[simulation][!hide]")
 
     Hash networkID = sha256(getTestConfig().NETWORK_PASSPHRASE);
     Simulation::pointer simulation =
-        Topologies::assymetric(Simulation::OVER_LOOPBACK, networkID);
+        Topologies::asymmetric(Simulation::OVER_LOOPBACK, networkID);
     simulation->startAllNodes();
 
     simulation->crankUntil(
@@ -174,7 +175,7 @@ resilienceTest(Simulation::pointer sim)
 
     sim->startAllNodes();
 
-    std::uniform_int_distribution<size_t> gen(0, nbNodes - 1);
+    stellar::uniform_int_distribution<size_t> gen(0, nbNodes - 1);
 
     // bring network to a good place
     uint32 targetLedger = LedgerManager::GENESIS_LEDGER_SEQ + 1;
@@ -394,7 +395,8 @@ TEST_CASE(
     auto& app = *nodes[0]; // pick a node to generate load
 
     auto& loadGen = app.getLoadGenerator();
-    loadGen.generateLoad(true, 3, 0, 0, 10, 100, std::chrono::seconds(0), 0);
+    loadGen.generateLoad(LoadGenMode::CREATE, 3, 0, 0, 10, 100,
+                         std::chrono::seconds(0), 0);
     try
     {
         simulation->crankUntil(
@@ -407,8 +409,8 @@ TEST_CASE(
             },
             3 * Herder::EXP_LEDGER_TIMESPAN_SECONDS, false);
 
-        loadGen.generateLoad(false, 3, 0, 10, 10, 100, std::chrono::seconds(0),
-                             0);
+        loadGen.generateLoad(LoadGenMode::PAY, 3, 0, 10, 10, 100,
+                             std::chrono::seconds(0), 0);
         simulation->crankUntil(
             [&]() {
                 return simulation->haveAllExternalized(8, 2) &&
@@ -521,8 +523,8 @@ TEST_CASE("Accounts vs latency", "[scalability][!hide]")
     uint32_t numItems = 500000;
 
     // Create accounts
-    loadGen.generateLoad(true, numItems, 0, 0, 10, 100, std::chrono::seconds(0),
-                         0);
+    loadGen.generateLoad(LoadGenMode::CREATE, numItems, 0, 0, 10, 100,
+                         std::chrono::seconds(0), 0);
 
     auto& complete =
         appPtr->getMetrics().NewMeter({"loadgen", "run", "complete"}, "run");
@@ -537,7 +539,7 @@ TEST_CASE("Accounts vs latency", "[scalability][!hide]")
     txtime.Clear();
 
     // Generate payment txs
-    loadGen.generateLoad(false, numItems, 0, numItems / 10, 10, 100,
+    loadGen.generateLoad(LoadGenMode::PAY, numItems, 0, numItems / 10, 10, 100,
                          std::chrono::seconds(0), 0);
     while (!io.stopped() && complete.count() == 1)
     {
@@ -572,8 +574,8 @@ netTopologyTest(std::string const& name,
         auto& app = *nodes[0];
 
         auto& loadGen = app.getLoadGenerator();
-        loadGen.generateLoad(true, 50, 0, 0, 10, 100, std::chrono::seconds(0),
-                             0);
+        loadGen.generateLoad(LoadGenMode::CREATE, 50, 0, 0, 10, 100,
+                             std::chrono::seconds(0), 0);
         auto& complete =
             app.getMetrics().NewMeter({"loadgen", "run", "complete"}, "run");
 
@@ -661,7 +663,6 @@ TEST_CASE("Bucket list entries vs write throughput", "[scalability][!hide]")
     Config const& cfg = getTestConfig();
 
     Application::pointer app = Application::create(clock, cfg);
-    autocheck::generator<std::vector<LedgerKey>> deadGen;
 
     auto& obj =
         app->getMetrics().NewMeter({"bucket", "object", "insert"}, "object");
@@ -681,7 +682,8 @@ TEST_CASE("Bucket list entries vs write throughput", "[scalability][!hide]")
         app->getBucketManager().addBatch(
             *app, i, Config::CURRENT_LEDGER_PROTOCOL_VERSION,
             LedgerTestUtils::generateValidLedgerEntries(100),
-            LedgerTestUtils::generateValidLedgerEntries(20), deadGen(5));
+            LedgerTestUtils::generateValidLedgerEntries(20),
+            LedgerTestUtils::generateLedgerKeys(5));
 
         if ((i & 0xff) == 0xff)
         {

@@ -4,6 +4,7 @@
 
 #include "transactions/TransactionBridge.h"
 #include "transactions/TransactionFrame.h"
+#include "util/GlobalChecks.h"
 
 namespace stellar
 {
@@ -29,9 +30,14 @@ convertForV13(TransactionEnvelope const& input)
     txV1.sourceAccount.ed25519() = txV0.sourceAccountEd25519;
     txV1.fee = txV0.fee;
     txV1.seqNum = txV0.seqNum;
-    txV1.timeBounds = txV0.timeBounds;
     txV1.memo = txV0.memo;
     txV1.operations = txV0.operations;
+
+    if (txV0.timeBounds)
+    {
+        txV1.cond.type(PRECOND_TIME);
+        txV1.cond.timeBounds() = *txV0.timeBounds;
+    }
 
     return res;
 }
@@ -78,7 +84,7 @@ getOperations(TransactionEnvelope& env)
     case ENVELOPE_TYPE_TX:
         return env.v1().tx.operations;
     case ENVELOPE_TYPE_TX_FEE_BUMP:
-        assert(env.feeBump().tx.innerTx.type() == ENVELOPE_TYPE_TX);
+        releaseAssert(env.feeBump().tx.innerTx.type() == ENVELOPE_TYPE_TX);
         return env.feeBump().tx.innerTx.v1().tx.operations;
     default:
         abort();
@@ -111,21 +117,62 @@ setFee(TransactionFramePtr tx, uint32_t fee)
 }
 
 void
-setMinTime(TransactionFramePtr tx, int64_t minTime)
+setMemo(TransactionFramePtr tx, Memo memo)
 {
     auto& env = tx->getEnvelope();
-    auto& tb = env.type() == ENVELOPE_TYPE_TX_V0 ? env.v0().tx.timeBounds
-                                                 : env.v1().tx.timeBounds;
-    tb.activate().minTime = minTime;
+    Memo& m =
+        env.type() == ENVELOPE_TYPE_TX_V0 ? env.v0().tx.memo : env.v1().tx.memo;
+    m = memo;
 }
 
 void
-setMaxTime(TransactionFramePtr tx, int64_t maxTime)
+setMinTime(TransactionFramePtr tx, TimePoint minTime)
 {
     auto& env = tx->getEnvelope();
-    auto& tb = env.type() == ENVELOPE_TYPE_TX_V0 ? env.v0().tx.timeBounds
-                                                 : env.v1().tx.timeBounds;
-    tb.activate().maxTime = maxTime;
+    if (env.type() == ENVELOPE_TYPE_TX_V0)
+    {
+        env.v0().tx.timeBounds.activate().minTime = minTime;
+    }
+    else if (env.type() == ENVELOPE_TYPE_TX)
+    {
+        auto& cond = env.v1().tx.cond;
+        switch (cond.type())
+        {
+        case PRECOND_NONE:
+            cond.type(PRECOND_TIME);
+        case PRECOND_TIME:
+            cond.timeBounds().minTime = minTime;
+            break;
+        case PRECOND_V2:
+            cond.v2().timeBounds.activate().minTime = minTime;
+            break;
+        }
+    }
+}
+
+void
+setMaxTime(TransactionFramePtr tx, TimePoint maxTime)
+{
+    auto& env = tx->getEnvelope();
+    if (env.type() == ENVELOPE_TYPE_TX_V0)
+    {
+        env.v0().tx.timeBounds.activate().maxTime = maxTime;
+    }
+    else if (env.type() == ENVELOPE_TYPE_TX)
+    {
+        auto& cond = env.v1().tx.cond;
+        switch (cond.type())
+        {
+        case PRECOND_NONE:
+            cond.type(PRECOND_TIME);
+        case PRECOND_TIME:
+            cond.timeBounds().maxTime = maxTime;
+            break;
+        case PRECOND_V2:
+            cond.v2().timeBounds.activate().maxTime = maxTime;
+            break;
+        }
+    }
 }
 #endif
 }

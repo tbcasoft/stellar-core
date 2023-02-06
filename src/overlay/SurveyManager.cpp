@@ -95,7 +95,7 @@ void
 SurveyManager::relayOrProcessResponse(StellarMessage const& msg,
                                       Peer::pointer peer)
 {
-    assert(msg.type() == SURVEY_RESPONSE);
+    releaseAssert(msg.type() == SURVEY_RESPONSE);
     auto const& signedResponse = msg.signedSurveyResponseMessage();
     auto const& response = signedResponse.response;
 
@@ -154,7 +154,7 @@ void
 SurveyManager::relayOrProcessRequest(StellarMessage const& msg,
                                      Peer::pointer peer)
 {
-    assert(msg.type() == SURVEY_REQUEST);
+    releaseAssert(msg.type() == SURVEY_REQUEST);
     SignedSurveyRequestMessage const& signedRequest =
         msg.signedSurveyRequestMessage();
 
@@ -229,7 +229,7 @@ SurveyManager::makeSurveyRequest(NodeID const& nodeToSurvey) const
     auto& signedRequest = newMsg.signedSurveyRequestMessage();
 
     auto& request = signedRequest.request;
-    request.ledgerNum = mApp.getHerder().getCurrentLedgerSeq();
+    request.ledgerNum = mApp.getHerder().trackingConsensusLedgerIndex();
     request.surveyorPeerID = mApp.getConfig().NODE_SEED.getPublicKey();
 
     request.surveyedPeerID = nodeToSurvey;
@@ -253,7 +253,7 @@ void
 SurveyManager::processTopologyResponse(NodeID const& surveyedPeerID,
                                        SurveyResponseBody const& body)
 {
-    assert(body.type() == SURVEY_TOPOLOGY);
+    releaseAssert(body.type() == SURVEY_TOPOLOGY);
 
     auto const& topologyBody = body.topologyResponseBody();
     auto& peerResults =
@@ -568,7 +568,8 @@ SurveyManager::commandTypeName(SurveyMessageCommandType type)
     case SURVEY_TOPOLOGY:
         return "SURVEY_TOPOLOGY";
     default:
-        throw std::runtime_error(fmt::format("Unknown commandType={}", type));
+        throw std::runtime_error(
+            fmt::format(FMT_STRING("Unknown commandType={}"), type));
     }
 }
 }

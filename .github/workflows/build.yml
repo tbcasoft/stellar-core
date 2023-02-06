@@ -1,3 +1,5 @@
+name: CI
+
 on:
   pull_request:
   push:
@@ -12,11 +14,8 @@ jobs:
       matrix:
         toolchain: [ "gcc", "clang"]
         protocol: ["current", "next"]
+        scenario: ["", "--check-test-tx-meta"]
     steps:
-      - name: Cancel Stale Workflows
-        uses: styfle/cancel-workflow-action@0.8.0
-        with:
-          access_token: ${{ github.token }}
       - name: Compute cache key
         # this step works around a limitation in actions/cache
         # that does not allow updating a cache
@@ -47,11 +46,11 @@ jobs:
           sudo apt-get -y install --no-install-recommends apt-utils dialog git iproute2 procps lsb-release
       - name: install tool chain
         run: |
-          sudo apt-get -y install libstdc++-7-dev clang-format-8 ccache
+          sudo apt-get -y install libstdc++-8-dev clang-format-10 ccache
           if test "${{ matrix.toolchain }}" = "gcc" ; then
-            sudo apt-get -y install cpp-7 gcc-7 g++-7
+            sudo apt-get -y install cpp-8 gcc-8 g++-8
           else
-            sudo apt-get -y install clang-8 llvm-8
+            sudo apt-get -y install clang-10 llvm-10
           fi
       - name: install dependencies
         run: sudo apt-get -y install postgresql git build-essential pkg-config autoconf automake libtool bison flex libpq-dev parallel libunwind-dev
@@ -65,4 +64,4 @@ jobs:
             export CXX='clang++'
           fi
           echo Build with $CC and $CXX
-          ./ci-build.sh --use-temp-db --protocol ${{ matrix.protocol }}
+          ./ci-build.sh --use-temp-db --protocol ${{ matrix.protocol }} ${{ matrix.scenario }}

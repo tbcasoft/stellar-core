@@ -27,11 +27,10 @@ getCreateAccountResultCode(TransactionFrameBasePtr& tx, size_t i)
     return opRes.tr().createAccountResult().code();
 }
 
-TEST_CASE("create account", "[tx][createaccount]")
+TEST_CASE_VERSIONS("create account", "[tx][createaccount]")
 {
     VirtualClock clock;
     auto app = createTestApplication(clock, getTestConfig());
-    app->start();
 
     // set up world
     auto root = TestAccount::createRoot(*app);
@@ -209,6 +208,6 @@ TEST_CASE("create account", "[tx][createaccount]")
         // This works because root is the sponsoring account in
         // tooManySponsoring
         tooManySponsoring(*app, a1, a2, root.op(createAccount(a1, 0)),
-                          root.op(createAccount(a2, 0)));
+                          root.op(createAccount(a2, 0)), 2);
     }
 }

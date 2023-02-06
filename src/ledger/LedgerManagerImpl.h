@@ -6,11 +6,13 @@
 #include "util/asio.h"
 
 #include "history/HistoryManager.h"
+#include "ledger/LedgerCloseMetaFrame.h"
 #include "ledger/LedgerManager.h"
 #include "main/PersistentState.h"
 #include "transactions/TransactionFrame.h"
 #include "util/XDRStream.h"
 #include "xdr/Stellar-ledger.h"
+#include <filesystem>
 #include <string>
 
 /*
@@ -33,6 +35,7 @@ class AbstractLedgerTxn;
 class Application;
 class Database;
 class LedgerTxnHeader;
+class BasicWork;
 
 class LedgerManagerImpl : public LedgerManager
 {
@@ -41,6 +44,9 @@ class LedgerManagerImpl : public LedgerManager
   protected:
     Application& mApp;
     std::unique_ptr<XDROutputFileStream> mMetaStream;
+    std::unique_ptr<XDROutputFileStream> mMetaDebugStream;
+    std::weak_ptr<BasicWork> mFlushAndRotateMetaDebugWork;
+    std::filesystem::path mMetaDebugPath;
 
   private:
     medida::Timer& mTransactionApply;
@@ -50,28 +56,32 @@ class LedgerManagerImpl : public LedgerManager
     medida::Timer& mLedgerClose;
     medida::Buckets& mLedgerAgeClosed;
     medida::Counter& mLedgerAge;
+    medida::Timer& mMetaStreamWriteTime;
     VirtualClock::time_point mLastClose;
+    bool mRebuildInMemoryState{false};
 
     std::unique_ptr<VirtualClock::time_point> mStartCatchup;
     medida::Timer& mCatchupDuration;
 
-    std::unique_ptr<LedgerCloseMeta> mNextMetaToEmit;
+    std::unique_ptr<LedgerCloseMetaFrame> mNextMetaToEmit;
 
-    void
-    processFeesSeqNums(std::vector<TransactionFrameBasePtr>& txs,
-                       AbstractLedgerTxn& ltxOuter, int64_t baseFee,
-                       std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta);
+    void processFeesSeqNums(
+        std::vector<TransactionFrameBasePtr> const& txs,
+        AbstractLedgerTxn& ltxOuter, TxSetFrame const& txSet,
+        std::unique_ptr<LedgerCloseMetaFrame> const& ledgerCloseMeta);
 
-    void
-    applyTransactions(std::vector<TransactionFrameBasePtr>& txs,
-                      AbstractLedgerTxn& ltx, TransactionResultSet& txResultSet,
-                      std::unique_ptr<LedgerCloseMeta> const& ledgerCloseMeta);
+    void applyTransactions(
+        TxSetFrame const& txSet,
+        std::vector<TransactionFrameBasePtr> const& txs, AbstractLedgerTxn& ltx,
+        TransactionResultSet& txResultSet,
+        std::unique_ptr<LedgerCloseMetaFrame> const& ledgerCloseMeta);
 
     void ledgerClosed(AbstractLedgerTxn& ltx);
 
-    void storeCurrentLedger(LedgerHeader const& header);
-    void prefetchTransactionData(std::vector<TransactionFrameBasePtr>& txs);
-    void prefetchTxSourceIds(std::vector<TransactionFrameBasePtr>& txs);
+    void storeCurrentLedger(LedgerHeader const& header, bool storeHeader);
+    void
+    prefetchTransactionData(std::vector<TransactionFrameBasePtr> const& txs);
+    void prefetchTxSourceIds(std::vector<TransactionFrameBasePtr> const& txs);
     void closeLedgerIf(LedgerCloseData const& ledgerData);
 
     State mState;
@@ -110,8 +120,9 @@ class LedgerManagerImpl : public LedgerManager
 
     void startNewLedger(LedgerHeader const& genesisLedger);
     void startNewLedger() override;
-    void loadLastKnownLedger(
-        std::function<void(asio::error_code const& ec)> handler) override;
+    void loadLastKnownLedger(std::function<void()> handler) override;
+    virtual bool rebuildingInMemoryState() override;
+    virtual void setupInMemoryStateRebuild() override;
 
     LedgerHeaderHistoryEntry const& getLastClosedLedgerHeader() const override;
 
@@ -119,8 +130,10 @@ class LedgerManagerImpl : public LedgerManager
 
     Database& getDatabase() override;
 
-    void startCatchup(CatchupConfiguration configuration,
-                      std::shared_ptr<HistoryArchive> archive) override;
+    void
+    startCatchup(CatchupConfiguration configuration,
+                 std::shared_ptr<HistoryArchive> archive,
+                 std::set<std::shared_ptr<Bucket>> bucketsToRetain) override;
 
     void closeLedger(LedgerCloseData const& ledgerData) override;
     void deleteOldEntries(Database& db, uint32_t ledgerSeq,
@@ -128,11 +141,12 @@ class LedgerManagerImpl : public LedgerManager
 
     void deleteNewerEntries(Database& db, uint32_t ledgerSeq) override;
 
-    void
-    setLastClosedLedger(LedgerHeaderHistoryEntry const& lastClosed) override;
+    void setLastClosedLedger(LedgerHeaderHistoryEntry const& lastClosed,
+                             bool storeInDB) override;
 
     void manuallyAdvanceLedgerHeader(LedgerHeader const& header) override;
 
     void setupLedgerCloseMetaStream();
+    void maybeResetLedgerCloseMetaDebugStream(uint32_t ledgerSeq);
 };
 }

@@ -6,7 +6,6 @@
 
 #include "Slot.h"
 #include "crypto/Hex.h"
-#include "crypto/SHA.h"
 #include "lib/json/json.h"
 #include "scp/LocalNode.h"
 #include "scp/QuorumSetUtils.h"
@@ -25,7 +24,7 @@ namespace stellar
 using namespace std::placeholders;
 
 NominationProtocol::NominationProtocol(Slot& slot)
-    : mSlot(slot), mRoundNumber(0), mNominationStarted(false)
+    : mSlot(slot), mRoundNumber(0), mNominationStarted(false), mTimerExpCount(0)
 {
     CLOG_DEBUG(SCP,
                "### new NominationProtocol object, value of external global "
@@ -723,6 +722,11 @@ NominationProtocol::nominate(ValueWrapperPtr value, Value const& previousValue,
 
     bool updated = false;
 
+    if (timedout)
+    {
+        mTimerExpCount++;
+    }
+
     if (timedout && !mNominationStarted)
     {
         CLOG_DEBUG(SCP, "NominationProtocol::nominate (TIMED OUT)");
@@ -855,6 +859,67 @@ NominationProtocol::getJsonInfo()
     }
 
     return ret;
+}
+
+SCP::QuorumInfoNodeState
+NominationProtocol::getState(NodeID const& n, bool selfAlreadyMovedOn)
+{
+    auto state = SCP::QuorumInfoNodeState::AGREE;
+    if (n == mSlot.getLocalNode()->getNodeID())
+    {
+        // always mark myself as AGREE.
+        return state;
+    }
+
+    bool enoughTimeHasPassed =
+        mTimerExpCount >= Slot::NUM_TIMEOUTS_THRESHOLD_FOR_REPORTING ||
+
+        selfAlreadyMovedOn;
+
+    auto it = mLatestNominations.find(n);
+    if (it == mLatestNominations.end())
+    {
+        if (enoughTimeHasPassed)
+        {
+            state = SCP::QuorumInfoNodeState::MISSING;
+        }
+        else
+        {
+            // Not enough time has passed to start calling this node missing.
+            state = SCP::QuorumInfoNodeState::NO_INFO;
+        }
+    }
+    else
+    {
+        if (enoughTimeHasPassed && mLastEnvelope)
+        {
+            // Enough time has passed & we have some information on this node.
+            // We'll examine the information to determine the state of this
+            // node.
+            auto const& other =
+                it->second->getStatement().pledges.nominate().accepted;
+            auto const& mine =
+                mLastEnvelope->getStatement().pledges.nominate().accepted;
+
+            bool notEq, isSubset = isSubsetHelper(other, mine, notEq);
+            if (isSubset)
+            {
+                if (notEq)
+                {
+                    // If there's some values that I've accepted that
+                    // they haven't, they are slow.
+                    state = SCP::QuorumInfoNodeState::DELAYED;
+                }
+            }
+            else
+            {
+                // If they have accepted a value that I haven't,
+                // it's likely that I'll never accept it.
+                state = SCP::QuorumInfoNodeState::DISAGREE;
+            }
+        }
+    }
+    return state;
 }
 
 void

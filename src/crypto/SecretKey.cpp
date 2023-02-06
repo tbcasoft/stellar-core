@@ -8,13 +8,16 @@
 #include "crypto/Curve25519.h"
 #include "crypto/Hex.h"
 #include "crypto/KeyUtils.h"
+#include "crypto/Random.h"
 #include "crypto/StrKey.h"
 #include "main/Config.h"
 #include "transactions/SignatureUtils.h"
+#include "util/GlobalChecks.h"
 #include "util/HashOfHash.h"
 #include "util/Math.h"
 #include "util/RandomEvictionCache.h"
 #include <Tracy.hpp>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <sodium.h>
@@ -22,6 +25,10 @@
 
 #ifdef MSAN_ENABLED
 #include <sanitizer/msan_interface.h>
+#endif
+
+#ifdef BUILD_TESTS
+#include "lib/catch.hpp"
 #endif
 
 namespace stellar
@@ -43,7 +50,7 @@ static Hash
 verifySigCacheKey(PublicKey const& key, Signature const& signature,
                   ByteSlice const& bin)
 {
-    assert(key.type() == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(key.type() == PUBLIC_KEY_TYPE_ED25519);
 
     BLAKE2 hasher;
     hasher.add(key.ed25519());
@@ -83,7 +90,7 @@ SecretKey::getPublicKey() const
 SecretKey::Seed
 SecretKey::getSeed() const
 {
-    assert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
 
     Seed seed;
     seed.mKeyType = mKeyType;
@@ -98,7 +105,7 @@ SecretKey::getSeed() const
 SecretValue
 SecretKey::getStrKeySeed() const
 {
-    assert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
 
     return strKey::toStrKey(strKey::STRKEY_SEED_ED25519, getSeed().mSeed);
 }
@@ -126,7 +133,7 @@ Signature
 SecretKey::sign(ByteSlice const& bin) const
 {
     ZoneScoped;
-    assert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(mKeyType == PUBLIC_KEY_TYPE_ED25519);
 
     Signature out(crypto_sign_BYTES, 0);
     if (crypto_sign_detached(out.data(), NULL, bin.data(), bin.size(),
@@ -141,7 +148,7 @@ SecretKey
 SecretKey::random()
 {
     SecretKey sk;
-    assert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
     if (crypto_sign_keypair(sk.mPublicKey.ed25519().data(),
                             sk.mSecretKey.data()) != 0)
     {
@@ -153,9 +160,82 @@ SecretKey::random()
     return sk;
 }
 
+struct SignVerifyTestcase
+{
+    SecretKey key;
+    std::vector<uint8_t> msg;
+    Signature sig;
+    void
+    sign()
+    {
+        sig = key.sign(msg);
+    }
+    void
+    verify()
+    {
+        if (!PubKeyUtils::verifySig(key.getPublicKey(), sig, msg))
+        {
+            throw std::runtime_error("verify failed");
+        }
+    }
+    static SignVerifyTestcase
+    create()
+    {
+        SignVerifyTestcase st;
+        st.key = SecretKey::random();
+        st.msg = randomBytes(256);
+        return st;
+    }
+};
+
+void
+SecretKey::benchmarkOpsPerSecond(size_t& sign, size_t& verify,
+                                 size_t iterations, size_t cachedVerifyPasses)
+{
+    namespace ch = std::chrono;
+    using clock = ch::high_resolution_clock;
+    using usec = ch::microseconds;
+
+    std::vector<SignVerifyTestcase> cases;
+
+    for (size_t i = 0; i < iterations; ++i)
+    {
+        cases.push_back(SignVerifyTestcase::create());
+    }
+
+    auto signStart = clock::now();
+    for (auto& c : cases)
+    {
+        c.sign();
+    }
+    auto signEnd = clock::now();
+    auto verifyStart = clock::now();
+    for (auto pass = 0; pass < cachedVerifyPasses; ++pass)
+    {
+        if (pass == 1)
+        {
+            // If we have more than 1 pass, reset clock after
+            // first so we are only measuring cache-hits.
+            verifyStart = clock::now();
+        }
+        for (auto& c : cases)
+        {
+            c.verify();
+        }
+    }
+    auto verifyEnd = clock::now();
+
+    auto signUsec = ch::duration_cast<usec>(signEnd - signStart);
+    auto verifyUsec = ch::duration_cast<usec>(verifyEnd - verifyStart);
+    sign = 1000000 / std::max(size_t(1), size_t(signUsec.count() / iterations));
+    verify =
+        1000000 / std::max(size_t(1), size_t(verifyUsec.count() / iterations));
+}
+
 #ifdef BUILD_TESTS
+template <typename Rng>
 static std::vector<uint8_t>
-getPRNGBytes(size_t n, stellar_default_random_engine& engine)
+getPRNGBytes(size_t n, Rng& engine)
 {
     std::vector<uint8_t> bytes;
     for (size_t i = 0; i < n; ++i)
@@ -165,8 +245,9 @@ getPRNGBytes(size_t n, stellar_default_random_engine& engine)
     return bytes;
 }
 
+template <typename Rng>
 static SecretKey
-pseudoRandomForTestingFromPRNG(stellar_default_random_engine& engine)
+pseudoRandomForTestingFromPRNG(Rng& engine)
 {
     return SecretKey::fromSeed(getPRNGBytes(crypto_sign_SEEDBYTES, engine));
 }
@@ -177,7 +258,7 @@ SecretKey::pseudoRandomForTesting()
     // Reminder: this is not cryptographic randomness or even particularly hard
     // to guess PRNG-ness. It's intended for _deterministic_ use, when you want
     // "slightly random-ish" keys, for test-data generation.
-    return pseudoRandomForTestingFromPRNG(gRandomEngine);
+    return pseudoRandomForTestingFromPRNG(Catch::rng());
 }
 
 SecretKey
@@ -195,7 +276,7 @@ SecretKey
 SecretKey::fromSeed(ByteSlice const& seed)
 {
     SecretKey sk;
-    assert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
 
     if (seed.size() != crypto_sign_SEEDBYTES)
     {
@@ -223,7 +304,7 @@ SecretKey::fromStrKeySeed(std::string const& strKeySeed)
     }
 
     SecretKey sk;
-    assert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(sk.mKeyType == PUBLIC_KEY_TYPE_ED25519);
     if (crypto_sign_seed_keypair(sk.mPublicKey.ed25519().data(),
                                  sk.mSecretKey.data(), seed.data()) != 0)
     {
@@ -268,6 +349,13 @@ KeyFunctions<PublicKey>::getKeyVersionIsSupported(
     }
 }
 
+bool
+KeyFunctions<PublicKey>::getKeyVersionIsVariableLength(
+    strKey::StrKeyVersionByte keyVersion)
+{
+    return false;
+}
+
 PublicKeyType
 KeyFunctions<PublicKey>::toKeyType(strKey::StrKeyVersionByte keyVersion)
 {
@@ -293,7 +381,7 @@ KeyFunctions<PublicKey>::toKeyVersion(PublicKeyType keyType)
 }
 
 uint256&
-KeyFunctions<PublicKey>::getKeyValue(PublicKey& key)
+KeyFunctions<PublicKey>::getEd25519Value(PublicKey& key)
 {
     switch (key.type())
     {
@@ -305,7 +393,7 @@ KeyFunctions<PublicKey>::getKeyValue(PublicKey& key)
 }
 
 uint256 const&
-KeyFunctions<PublicKey>::getKeyValue(PublicKey const& key)
+KeyFunctions<PublicKey>::getEd25519Value(PublicKey const& key)
 {
     switch (key.type())
     {
@@ -316,12 +404,32 @@ KeyFunctions<PublicKey>::getKeyValue(PublicKey const& key)
     }
 }
 
+std::vector<uint8_t>
+KeyFunctions<PublicKey>::getKeyValue(PublicKey const& key)
+{
+    return xdr::xdr_to_opaque(getEd25519Value(key));
+}
+
+void
+KeyFunctions<PublicKey>::setKeyValue(PublicKey& key,
+                                     std::vector<uint8_t> const& data)
+{
+    switch (key.type())
+    {
+    case PUBLIC_KEY_TYPE_ED25519:
+        xdr::xdr_from_opaque(data, key.ed25519());
+        break;
+    default:
+        throw CryptoError("invalid public key type");
+    }
+}
+
 bool
 PubKeyUtils::verifySig(PublicKey const& key, Signature const& signature,
                        ByteSlice const& bin)
 {
     ZoneScoped;
-    assert(key.type() == PUBLIC_KEY_TYPE_ED25519);
+    releaseAssert(key.type() == PUBLIC_KEY_TYPE_ED25519);
     if (signature.size() != 64)
     {
         return false;
@@ -342,11 +450,11 @@ PubKeyUtils::verifySig(PublicKey const& key, Signature const& signature,
 
     std::string missStr("miss");
     ZoneText(missStr.c_str(), missStr.size());
-    ++gVerifyCacheMiss;
     bool ok =
         (crypto_sign_verify_detached(signature.data(), bin.data(), bin.size(),
                                      key.ed25519().data()) == 0);
     std::lock_guard<std::mutex> guard(gVerifySigCacheMutex);
+    ++gVerifyCacheMiss;
     gVerifySigCache.put(cacheKey, ok);
     return ok;
 }
@@ -457,7 +565,8 @@ namespace std
 size_t
 hash<stellar::PublicKey>::operator()(stellar::PublicKey const& k) const noexcept
 {
-    assert(k.type() == stellar::PUBLIC_KEY_TYPE_ED25519);
+    using namespace stellar;
+    releaseAssert(k.type() == stellar::PUBLIC_KEY_TYPE_ED25519);
 
     return std::hash<stellar::uint256>()(k.ed25519());
 }

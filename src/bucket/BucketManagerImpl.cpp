@@ -4,9 +4,12 @@
 
 #include "bucket/BucketManagerImpl.h"
 #include "bucket/Bucket.h"
+#include "bucket/BucketInputIterator.h"
 #include "bucket/BucketList.h"
+#include "bucket/BucketOutputIterator.h"
 #include "crypto/Hex.h"
 #include "history/HistoryManager.h"
+#include "historywork/VerifyBucketWork.h"
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
 #include "main/Config.h"
@@ -17,16 +20,20 @@
 #include "util/Logging.h"
 #include "util/TmpDir.h"
 #include "util/types.h"
+#include <fmt/chrono.h>
 #include <fmt/format.h>
 #include <fstream>
 #include <map>
 #include <regex>
 #include <set>
+#include <thread>
 
 #include "medida/counter.h"
 #include "medida/meter.h"
 #include "medida/metrics_registry.h"
 #include "medida/timer.h"
+#include "work/WorkScheduler.h"
+#include "xdrpp/printer.h"
 #include <Tracy.hpp>
 
 namespace stellar
@@ -66,10 +73,10 @@ BucketManagerImpl::initialize()
     }
     catch (std::exception const& e)
     {
-        throw std::runtime_error(
-            fmt::format("{}. This can be caused by access rights issues or "
-                        "another stellar-core process already running",
-                        e.what()));
+        throw std::runtime_error(fmt::format(
+            FMT_STRING("{}. This can be caused by access rights issues or "
+                       "another stellar-core process already running"),
+            e.what()));
     }
 
     mLockedBucketDir = std::make_unique<std::string>(d);
@@ -107,7 +114,10 @@ BucketManagerImpl::BucketManagerImpl(Application& app)
     , mBucketSnapMerge(app.getMetrics().NewTimer({"bucket", "snap", "merge"}))
     , mSharedBucketsSize(
           app.getMetrics().NewCounter({"bucket", "memory", "shared"}))
-    , mDeleteEntireBucketDirInDtor(!app.getConfig().MODE_KEEPS_BUCKETS)
+    // Minimal DB is stored in the buckets dir, so delete it only when
+    // mode does not use minimal DB
+    , mDeleteEntireBucketDirInDtor(
+          app.getConfig().isInMemoryModeWithoutMinimalDB())
 {
 }
 
@@ -219,7 +229,7 @@ BucketManagerImpl::deleteTmpDirAndUnlockBucketDir()
     {
         std::string d = mApp.getConfig().BUCKET_DIR_PATH;
         std::string lock = d + "/" + kLockFilename;
-        assert(fs::exists(lock));
+        releaseAssert(fs::exists(lock));
         fs::unlockFile(lock);
         mLockedBucketDir.reset();
     }
@@ -412,7 +422,7 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
             mSharedBucketsSize.set_count(mSharedBuckets.size());
         }
     }
-    assert(b);
+    releaseAssert(b);
     if (mergeKey)
     {
         // Second half of the mergeKey record-keeping, above: if we successfully
@@ -849,22 +859,244 @@ BucketManagerImpl::assumeState(HistoryArchiveState const& has,
 void
 BucketManagerImpl::shutdown()
 {
-    ZoneScoped;
-
-    if (!mIsShutdown)
-    {
-        mIsShutdown = true;
-
-        // This call happens in shutdown -- before destruction -- so that we
-        // can be sure other subsystems (ledger etc.) are still alive and we
-        // can call into them to figure out which buckets _are_ referenced.
-        forgetUnreferencedBuckets();
-    }
+    mIsShutdown = true;
 }
 
 bool
 BucketManagerImpl::isShutdown() const
 {
     return mIsShutdown;
+}
+
+// Loads a single bucket worth of entries into `map`, deleting dead entries and
+// inserting live or init entries. Should be called in a loop over a BL, from
+// old to new.
+static void
+loadEntriesFromBucket(std::shared_ptr<Bucket> b, std::string const& name,
+                      std::map<LedgerKey, LedgerEntry>& map)
+{
+    using namespace std::chrono;
+    medida::Timer timer;
+    BucketInputIterator in(b);
+    timer.Time([&]() {
+        while (in)
+        {
+            BucketEntry const& e = *in;
+            if (e.type() == LIVEENTRY || e.type() == INITENTRY)
+            {
+                map[LedgerEntryKey(e.liveEntry())] = e.liveEntry();
+            }
+            else
+            {
+                if (e.type() != DEADENTRY)
+                {
+                    std::string err = "Malformed bucket: unexpected "
+                                      "non-INIT/LIVE/DEAD entry.";
+                    CLOG_ERROR(Bucket, "{}", err);
+                    throw std::runtime_error(err);
+                }
+                size_t erased = map.erase(e.deadEntry());
+                if (erased != 1)
+                {
+                    std::string err = fmt::format(
+                        FMT_STRING("DEADENTRY does not exist in ledger: {}"),
+                        xdr::xdr_to_string(e.deadEntry(), "entry"));
+                    CLOG_ERROR(Bucket, "{}", err);
+                    throw std::runtime_error(err);
+                }
+            }
+            ++in;
+        }
+    });
+    nanoseconds ns =
+        timer.duration_unit() * static_cast<nanoseconds::rep>(timer.max());
+    milliseconds ms = duration_cast<milliseconds>(ns);
+    size_t bytesPerSec = (b->getSize() * 1000 / (1 + ms.count()));
+    CLOG_INFO(Bucket, "Read {}-byte bucket file '{}' in {} ({}/s)",
+              b->getSize(), name, ms, formatSize(bytesPerSec));
+}
+
+std::map<LedgerKey, LedgerEntry>
+BucketManagerImpl::loadCompleteLedgerState(HistoryArchiveState const& has)
+{
+    std::map<LedgerKey, LedgerEntry> ledgerMap;
+    std::vector<std::pair<Hash, std::string>> hashes;
+    for (uint32_t i = BucketList::kNumLevels; i > 0; --i)
+    {
+        HistoryStateBucket const& hsb = has.currentBuckets.at(i - 1);
+        hashes.emplace_back(hexToBin256(hsb.snap),
+                            fmt::format(FMT_STRING("snap {:d}"), i - 1));
+        hashes.emplace_back(hexToBin256(hsb.curr),
+                            fmt::format(FMT_STRING("curr {:d}"), i - 1));
+    }
+    for (auto const& pair : hashes)
+    {
+        if (isZero(pair.first))
+        {
+            continue;
+        }
+        auto b = getBucketByHash(pair.first);
+        if (!b)
+        {
+            throw std::runtime_error(std::string("missing bucket: ") +
+                                     binToHex(pair.first));
+        }
+        loadEntriesFromBucket(b, pair.second, ledgerMap);
+    }
+    return ledgerMap;
+}
+
+std::shared_ptr<Bucket>
+BucketManagerImpl::mergeBuckets(HistoryArchiveState const& has)
+{
+    std::map<LedgerKey, LedgerEntry> ledgerMap = loadCompleteLedgerState(has);
+    BucketMetadata meta;
+    MergeCounters mc;
+    auto& ctx = mApp.getClock().getIOContext();
+    meta.ledgerVersion = mApp.getConfig().LEDGER_PROTOCOL_VERSION;
+    BucketOutputIterator out(getTmpDir(), /*keepDeadEntries=*/false, meta, mc,
+                             ctx, /*doFsync=*/true);
+    for (auto const& pair : ledgerMap)
+    {
+        BucketEntry be;
+        be.type(LIVEENTRY);
+        be.liveEntry() = pair.second;
+        out.put(be);
+    }
+    return out.getBucket(*this);
+}
+
+static bool
+visitEntriesInBucket(std::shared_ptr<Bucket const> b, std::string const& name,
+                     std::optional<int64_t> minLedger,
+                     std::function<bool(LedgerEntry const&)> const& filterEntry,
+                     std::function<bool(LedgerEntry const&)> const& acceptEntry,
+                     UnorderedSet<LedgerKey>& processedEntries)
+{
+    using namespace std::chrono;
+    medida::Timer timer;
+
+    UnorderedMap<LedgerKey, LedgerEntry> bucketEntries;
+    bool stopIteration = false;
+    timer.Time([&]() {
+        for (BucketInputIterator in(b); in; ++in)
+        {
+            BucketEntry const& e = *in;
+            if (e.type() == LIVEENTRY || e.type() == INITENTRY)
+            {
+                if (minLedger &&
+                    e.liveEntry().lastModifiedLedgerSeq < *minLedger)
+                {
+                    stopIteration = true;
+                    continue;
+                }
+                if (!filterEntry(e.liveEntry()))
+                {
+                    continue;
+                }
+                auto key = LedgerEntryKey(e.liveEntry());
+                if (processedEntries.find(key) != processedEntries.end())
+                {
+                    continue;
+                }
+                bucketEntries[key] = e.liveEntry();
+            }
+            else
+            {
+                if (e.type() != DEADENTRY)
+                {
+                    std::string err = "Malformed bucket: unexpected "
+                                      "non-INIT/LIVE/DEAD entry.";
+                    CLOG_ERROR(Bucket, "{}", err);
+                    throw std::runtime_error(err);
+                }
+                bucketEntries.erase(e.deadEntry());
+                processedEntries.insert(e.deadEntry());
+            }
+        }
+        for (auto const& [key, entry] : bucketEntries)
+        {
+            processedEntries.insert(key);
+            if (!acceptEntry(entry))
+            {
+                stopIteration = true;
+                break;
+            }
+        }
+    });
+    nanoseconds ns =
+        timer.duration_unit() * static_cast<nanoseconds::rep>(timer.max());
+    milliseconds ms = duration_cast<milliseconds>(ns);
+    size_t bytesPerSec = (b->getSize() * 1000 / (1 + ms.count()));
+    CLOG_INFO(Bucket, "Processed {}-byte bucket file '{}' in {} ({}/s)",
+              b->getSize(), name, ms, formatSize(bytesPerSec));
+    return !stopIteration;
+}
+
+void
+BucketManagerImpl::visitLedgerEntries(
+    HistoryArchiveState const& has, std::optional<int64_t> minLedger,
+    std::function<bool(LedgerEntry const&)> const& filterEntry,
+    std::function<bool(LedgerEntry const&)> const& acceptEntry)
+{
+    UnorderedSet<LedgerKey> deletedEntries;
+    std::vector<std::pair<Hash, std::string>> hashes;
+    for (uint32_t i = 0; i < BucketList::kNumLevels; ++i)
+    {
+        HistoryStateBucket const& hsb = has.currentBuckets.at(i);
+        hashes.emplace_back(hexToBin256(hsb.curr),
+                            fmt::format(FMT_STRING("curr {:d}"), i));
+        hashes.emplace_back(hexToBin256(hsb.snap),
+                            fmt::format(FMT_STRING("snap {:d}"), i));
+    }
+    medida::Timer timer;
+    timer.Time([&]() {
+        for (auto const& pair : hashes)
+        {
+            if (isZero(pair.first))
+            {
+                continue;
+            }
+            auto b = getBucketByHash(pair.first);
+            if (!b)
+            {
+                throw std::runtime_error(std::string("missing bucket: ") +
+                                         binToHex(pair.first));
+            }
+            if (!visitEntriesInBucket(b, pair.second, minLedger, filterEntry,
+                                      acceptEntry, deletedEntries))
+            {
+                break;
+            }
+        }
+    });
+    auto ns = timer.duration_unit() *
+              static_cast<std::chrono::nanoseconds::rep>(timer.max());
+    CLOG_INFO(Bucket, "Total ledger processing time: {}",
+              std::chrono::duration_cast<std::chrono::milliseconds>(ns));
+}
+
+std::shared_ptr<BasicWork>
+BucketManagerImpl::scheduleVerifyReferencedBucketsWork()
+{
+    std::set<Hash> hashes = getReferencedBuckets();
+    std::vector<std::shared_ptr<BasicWork>> seq;
+    for (auto const& h : hashes)
+    {
+        if (isZero(h))
+        {
+            continue;
+        }
+        auto b = getBucketByHash(h);
+        if (!b)
+        {
+            throw std::runtime_error(fmt::format(
+                FMT_STRING("Missing referenced bucket {}"), binToHex(h)));
+        }
+        seq.emplace_back(std::make_shared<VerifyBucketWork>(
+            mApp, b->getFilename(), b->getHash(), nullptr));
+    }
+    return mApp.getWorkScheduler().scheduleWork<WorkSequence>(
+        "verify-referenced-buckets", seq);
 }
 }

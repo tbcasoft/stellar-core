@@ -13,6 +13,7 @@
 #include "main/Application.h"
 #include "main/ErrorMessages.h"
 #include "util/Logging.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDRCereal.h"
 #include <fmt/format.h>
 
@@ -69,9 +70,9 @@ InvariantManagerImpl::getEnabledInvariants() const
 }
 
 void
-InvariantManagerImpl::checkOnBucketApply(std::shared_ptr<Bucket const> bucket,
-                                         uint32_t ledger, uint32_t level,
-                                         bool isCurr)
+InvariantManagerImpl::checkOnBucketApply(
+    std::shared_ptr<Bucket const> bucket, uint32_t ledger, uint32_t level,
+    bool isCurr, std::function<bool(LedgerEntryType)> entryTypeFilter)
 {
     uint32_t oldestLedger = isCurr
                                 ? BucketList::oldestLedgerInCurr(ledger, level)
@@ -81,15 +82,16 @@ InvariantManagerImpl::checkOnBucketApply(std::shared_ptr<Bucket const> bucket,
                                     : BucketList::sizeOfSnap(ledger, level));
     for (auto invariant : mEnabled)
     {
-        auto result =
-            invariant->checkOnBucketApply(bucket, oldestLedger, newestLedger);
+        auto result = invariant->checkOnBucketApply(
+            bucket, oldestLedger, newestLedger, entryTypeFilter);
         if (result.empty())
         {
             continue;
         }
 
         auto message = fmt::format(
-            R"(invariant "{}" does not hold on bucket {}[{}] = {}: {})",
+            FMT_STRING(
+                R"(invariant "{}" does not hold on bucket {}[{}] = {}: {})"),
             invariant->getName(), isCurr ? "Curr" : "Snap", level,
             binToHex(bucket->getHash()), result);
         onInvariantFailure(invariant, message, ledger);
@@ -101,7 +103,8 @@ InvariantManagerImpl::checkOnOperationApply(Operation const& operation,
                                             OperationResult const& opres,
                                             LedgerTxnDelta const& ltxDelta)
 {
-    if (ltxDelta.header.current.ledgerVersion < 8)
+    if (protocolVersionIsBefore(ltxDelta.header.current.ledgerVersion,
+                                ProtocolVersion::V_8))
     {
         return;
     }
@@ -115,10 +118,10 @@ InvariantManagerImpl::checkOnOperationApply(Operation const& operation,
             continue;
         }
 
-        auto message =
-            fmt::format(R"(Invariant "{}" does not hold on operation: {}{}{})",
-                        invariant->getName(), result, "\n",
-                        xdr_to_string(operation, "Operation"));
+        auto message = fmt::format(
+            FMT_STRING(R"(Invariant "{}" does not hold on operation: {}{}{})"),
+            invariant->getName(), result, "\n",
+            xdr_to_string(operation, "Operation"));
         onInvariantFailure(invariant, message,
                            ltxDelta.header.current.ledgerSeq);
     }
@@ -155,8 +158,9 @@ InvariantManagerImpl::enableInvariant(std::string const& invPattern)
     }
     catch (std::regex_error& e)
     {
-        throw std::invalid_argument(fmt::format(
-            "Invalid invariant pattern '{}': {}", invPattern, e.what()));
+        throw std::invalid_argument(
+            fmt::format(FMT_STRING("Invalid invariant pattern '{}': {}"),
+                        invPattern, e.what()));
     }
 
     bool enabledSome = false;
@@ -182,7 +186,8 @@ InvariantManagerImpl::enableInvariant(std::string const& invPattern)
     if (!enabledSome)
     {
         std::string message = fmt::format(
-            "Invariant pattern '{}' did not match any invariants.", invPattern);
+            FMT_STRING("Invariant pattern '{}' did not match any invariants."),
+            invPattern);
         if (mInvariants.size() > 0)
         {
             using value_type = decltype(mInvariants)::value_type;

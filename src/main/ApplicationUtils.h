@@ -5,6 +5,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "history/HistoryArchive.h"
+#include "ledger/LedgerRange.h"
 #include "main/Application.h"
 #include <optional>
 
@@ -13,11 +14,22 @@ namespace stellar
 
 class CatchupConfiguration;
 
-int runWithConfig(Config cfg, std::optional<CatchupConfiguration> cc);
+// Create application and validate its configuration
+Application::pointer setupApp(Config& cfg, VirtualClock& clock,
+                              uint32_t startAtLedger,
+                              std::string const& startAtHash);
+int runApp(Application::pointer app);
 void setForceSCPFlag();
 void initializeDatabase(Config cfg);
 void httpCommand(std::string const& command, unsigned short port);
 int selfCheck(Config cfg);
+int mergeBucketList(Config cfg, std::string const& outputDir);
+int dumpLedger(Config cfg, std::string const& outputFile,
+               std::optional<std::string> filterQuery,
+               std::optional<uint32_t> lastModifiedLedgerCount,
+               std::optional<uint64_t> limit,
+               std::optional<std::string> groupBy,
+               std::optional<std::string> aggregate);
 void showOfflineInfo(Config cfg);
 int reportLastHistoryCheckpoint(Config cfg, std::string const& outputFile);
 #ifdef BUILD_TESTS
@@ -31,5 +43,16 @@ void writeCatchupInfo(Json::Value const& catchupInfo,
                       std::string const& outputFile);
 int catchup(Application::pointer app, CatchupConfiguration cc,
             Json::Value& catchupInfo, std::shared_ptr<HistoryArchive> archive);
+// Reduild ledger state based on the buckets. Ensure ledger state is properly
+// reset before calling this function.
+bool applyBucketsForLCL(Application& app);
+bool applyBucketsForLCL(Application& app,
+                        std::function<bool(LedgerEntryType)> onlyApply);
 int publish(Application::pointer app);
+std::string minimalDBForInMemoryMode(Config const& cfg);
+bool canRebuildInMemoryLedgerFromBuckets(uint32_t startAtLedger, uint32_t lcl);
+void setAuthenticatedLedgerHashPair(Application::pointer app,
+                                    LedgerNumHashPair& authPair,
+                                    uint32_t startLedger,
+                                    std::string startHash);
 }

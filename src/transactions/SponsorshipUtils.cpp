@@ -8,10 +8,50 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "overlay/StellarXDR.h"
 #include "transactions/TransactionUtils.h"
+#include "util/ProtocolVersion.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
+#include "xdr/Stellar-ledger-entries.h"
 
 using namespace stellar;
+
+namespace detail
+{
+static bool
+isSponsoringSubentrySumIncreaseValid(LedgerHeader const& lh,
+                                     LedgerEntry const& acc, uint32_t mult)
+{
+    return protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_18) ||
+           ((uint64_t)getNumSponsoring(acc) +
+            (uint64_t)acc.data.account().numSubEntries + (uint64_t)mult) <=
+               UINT32_MAX;
+}
+}
+
+static bool
+tooManySponsoring(LedgerHeader const& lh, LedgerEntry const& acc, uint32_t mult)
+{
+    if (getNumSponsoring(acc) > UINT32_MAX - mult)
+    {
+        return true;
+    }
+
+    return !detail::isSponsoringSubentrySumIncreaseValid(lh, acc, mult);
+}
+
+static bool
+tooManyNumSubEntries(LedgerHeader const& lh, LedgerEntry const& acc,
+                     uint32_t mult)
+{
+    if (protocolVersionStartsFrom(lh.ledgerVersion,
+                                  FIRST_PROTOCOL_SUPPORTING_OPERATION_LIMITS) &&
+        acc.data.account().numSubEntries > getAccountSubEntryLimit() - mult)
+    {
+        return true;
+    }
+
+    return !detail::isSponsoringSubentrySumIncreaseValid(lh, acc, mult);
+}
 
 static SponsorshipResult
 canEstablishSponsorshipHelper(LedgerHeader const& lh,
@@ -24,10 +64,11 @@ canEstablishSponsorshipHelper(LedgerHeader const& lh,
         return SponsorshipResult::LOW_RESERVE;
     }
 
-    if (getNumSponsoring(sponsoringAcc) > UINT32_MAX - mult)
+    if (tooManySponsoring(lh, sponsoringAcc, mult))
     {
         return SponsorshipResult::TOO_MANY_SPONSORING;
     }
+
     if (sponsoredAcc && getNumSponsored(*sponsoredAcc) > UINT32_MAX - mult)
     {
         return SponsorshipResult::TOO_MANY_SPONSORED;
@@ -145,21 +186,32 @@ isSignerSponsored(std::vector<Signer>::const_iterator const& signerIt,
 // Utility functions to check if you can establish/remove/transfer sponsorships
 //
 ////////////////////////////////////////////////////////////////////////////////
-static uint32_t
+int32_t
 computeMultiplier(LedgerEntry const& le)
 {
-    auto type = le.data.type();
-    if (type == ACCOUNT)
+    switch (le.data.type())
     {
+    case ACCOUNT:
         return 2;
-    }
-    else if (type == CLAIMABLE_BALANCE)
-    {
+    case TRUSTLINE:
+        return le.data.trustLine().asset.type() == ASSET_TYPE_POOL_SHARE ? 2
+                                                                         : 1;
+    case OFFER:
+    case DATA:
+        return 1;
+    case CLAIMABLE_BALANCE:
         return static_cast<uint32_t>(
             le.data.claimableBalance().claimants.size());
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONFIG_SETTING:
+    case CONTRACT_DATA:
+#endif
+    case LIQUIDITY_POOL:
+        throw std::runtime_error(
+            "Invalid LedgerEntry type in SponsorshipUtils");
+    default:
+        throw std::runtime_error("Unknown LedgerEntry type");
     }
-
-    return 1;
 }
 
 static bool
@@ -174,6 +226,13 @@ isSubentry(LedgerEntry const& le)
     case OFFER:
     case DATA:
         return true;
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+    case CONFIG_SETTING:
+#endif
+    case LIQUIDITY_POOL:
+        throw std::runtime_error(
+            "Invalid LedgerEntry type in SponsorshipUtils");
     default:
         throw std::runtime_error("Unknown LedgerEntry type");
     }
@@ -184,7 +243,7 @@ canEstablishEntrySponsorship(LedgerHeader const& lh, LedgerEntry const& le,
                              LedgerEntry const& sponsoringAcc,
                              LedgerEntry const* sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -202,7 +261,7 @@ canRemoveEntrySponsorship(LedgerHeader const& lh, LedgerEntry const& le,
                           LedgerEntry const& sponsoringAcc,
                           LedgerEntry const* sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -222,7 +281,7 @@ canTransferEntrySponsorship(LedgerHeader const& lh, LedgerEntry const& le,
                             LedgerEntry const& oldSponsoringAcc,
                             LedgerEntry const& newSponsoringAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -244,7 +303,7 @@ canEstablishSignerSponsorship(
     LedgerHeader const& lh, std::vector<Signer>::const_iterator const& signerIt,
     LedgerEntry const& sponsoringAcc, LedgerEntry const& sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -263,7 +322,7 @@ canRemoveSignerSponsorship(LedgerHeader const& lh,
                            LedgerEntry const& sponsoringAcc,
                            LedgerEntry const& sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -282,7 +341,7 @@ canTransferSignerSponsorship(
     LedgerEntry const& oldSponsoringAcc, LedgerEntry const& newSponsoringAcc,
     LedgerEntry const& sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -416,14 +475,14 @@ canCreateEntryWithoutSponsorship(LedgerHeader const& lh, LedgerEntry const& le,
 {
     if (le.data.type() != ACCOUNT)
     {
-        if (lh.ledgerVersion >= FIRST_PROTOCOL_SUPPORTING_OPERATION_LIMITS &&
-            acc.data.account().numSubEntries >= ACCOUNT_SUBENTRY_LIMIT)
+        uint32_t mult = computeMultiplier(le);
+
+        if (tooManyNumSubEntries(lh, acc, mult))
         {
             return SponsorshipResult::TOO_MANY_SUBENTRIES;
         }
 
-        uint32_t mult = computeMultiplier(le);
-        if (lh.ledgerVersion < 9)
+        if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_9))
         {
             // This is needed to handle the overflow in getMinBalance which was
             // corrected in protocol version 9
@@ -459,15 +518,15 @@ canCreateEntryWithSponsorship(LedgerHeader const& lh, LedgerEntry const& le,
                               LedgerEntry const& sponsoringAcc,
                               LedgerEntry const* sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
 
     if (sponsoredAcc && isSubentry(le))
     {
-        auto const& acc = sponsoredAcc->data.account();
-        if (acc.numSubEntries >= ACCOUNT_SUBENTRY_LIMIT)
+        uint32_t mult = computeMultiplier(le);
+        if (tooManyNumSubEntries(lh, *sponsoredAcc, mult))
         {
             return SponsorshipResult::TOO_MANY_SUBENTRIES;
         }
@@ -495,7 +554,7 @@ canRemoveEntryWithSponsorship(LedgerHeader const& lh, LedgerEntry const& le,
                               LedgerEntry const& sponsoringAcc,
                               LedgerEntry const* sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -523,8 +582,7 @@ SponsorshipResult
 canCreateSignerWithoutSponsorship(LedgerHeader const& lh,
                                   LedgerEntry const& acc)
 {
-    if (lh.ledgerVersion >= FIRST_PROTOCOL_SUPPORTING_OPERATION_LIMITS &&
-        acc.data.account().numSubEntries >= ACCOUNT_SUBENTRY_LIMIT)
+    if (tooManyNumSubEntries(lh, acc, 1))
     {
         return SponsorshipResult::TOO_MANY_SUBENTRIES;
     }
@@ -542,13 +600,12 @@ canCreateSignerWithSponsorship(
     LedgerHeader const& lh, std::vector<Signer>::const_iterator const& signerIt,
     LedgerEntry const& sponsoringAcc, LedgerEntry const& sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
 
-    auto const& acc = sponsoredAcc.data.account();
-    if (acc.numSubEntries >= ACCOUNT_SUBENTRY_LIMIT)
+    if (tooManyNumSubEntries(lh, sponsoredAcc, 1))
     {
         return SponsorshipResult::TOO_MANY_SUBENTRIES;
     }
@@ -572,7 +629,7 @@ canRemoveSignerWithSponsorship(LedgerHeader const& lh,
                                LedgerEntry const& sponsoringAcc,
                                LedgerEntry const& sponsoredAcc)
 {
-    if (lh.ledgerVersion < 14)
+    if (protocolVersionIsBefore(lh.ledgerVersion, ProtocolVersion::V_14))
     {
         throw std::runtime_error("sponsorship before version 14");
     }
@@ -599,7 +656,7 @@ createEntryWithoutSponsorship(LedgerEntry& le, LedgerEntry& acc)
 {
     if (isSubentry(le))
     {
-        ++acc.data.account().numSubEntries;
+        acc.data.account().numSubEntries += computeMultiplier(le);
     }
 }
 
@@ -619,7 +676,7 @@ removeEntryWithoutSponsorship(LedgerEntry& le, LedgerEntry& acc)
 {
     if (le.data.type() != ACCOUNT)
     {
-        --acc.data.account().numSubEntries;
+        acc.data.account().numSubEntries -= computeMultiplier(le);
     }
 }
 

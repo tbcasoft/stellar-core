@@ -45,6 +45,12 @@ LoopbackPeer::getAuthCert()
 }
 
 void
+LoopbackPeer::scheduleRead()
+{
+    processInQueue();
+}
+
+void
 LoopbackPeer::sendMessage(xdr::msg_ptr&& msg)
 {
     if (mRemote.expired())
@@ -104,7 +110,7 @@ LoopbackPeer::drop(std::string const& reason, DropDirection direction, DropMode)
 
     mDropReason = reason;
     mState = CLOSING;
-    mRecurringTimer.cancel();
+    Peer::shutdown();
     getApp().getOverlayManager().removePeer(this);
 
     auto remote = mRemote.lock();
@@ -164,6 +170,12 @@ duplicateMessage(Peer::TimestampedMessage const& msg)
 void
 LoopbackPeer::processInQueue()
 {
+    if (!hasReadingCapacity())
+    {
+        mIsPeerThrottled = true;
+        return;
+    }
+
     if (!mInQueue.empty() && mState != CLOSING)
     {
         auto const& m = mInQueue.front();
@@ -479,5 +491,11 @@ std::shared_ptr<LoopbackPeer>
 LoopbackPeerConnection::getAcceptor() const
 {
     return mAcceptor;
+}
+
+bool
+LoopbackPeer::checkCapacity(uint64_t expectedOutboundCapacity) const
+{
+    return expectedOutboundCapacity == mOutboundCapacity;
 }
 }

@@ -26,6 +26,14 @@ while [[ -n "$1" ]]; do
             export TEMP_POSTGRES=1
             echo Using temp database
             ;;
+    "--check-test-tx-meta")
+            if [[ -z "${PROTOCOL}" ]]; then
+                echo 'must specify --protocol before --check-test-tx-meta'
+                exit 1
+            fi
+            export TEST_SPEC='[tx]'
+            export STELLAR_CORE_TEST_PARAMS="--ll fatal -r simple --all-versions --rng-seed 12345 --check-test-tx-meta ${PWD}/test-tx-meta-baseline-${PROTOCOL}"
+            ;;
     "--protocol")
             PROTOCOL="$1"
             shift
@@ -81,20 +89,20 @@ hash -r
 
 if test $CXX = 'clang++'; then
     RUN_PARTITIONS=$(seq 0 $((NPROCS-1)))
-    which clang-8
-    ln -s `which clang-8` bin/clang
-    which clang++-8
-    ln -s `which clang++-8` bin/clang++
-    which llvm-symbolizer-8
-    ln -s `which llvm-symbolizer-8` bin/llvm-symbolizer
+    which clang-10
+    ln -s `which clang-10` bin/clang
+    which clang++-10
+    ln -s `which clang++-10` bin/clang++
+    which llvm-symbolizer-10
+    ln -s `which llvm-symbolizer-10` bin/llvm-symbolizer
     clang -v
     llvm-symbolizer --version || true
 elif test $CXX = 'g++'; then
     RUN_PARTITIONS=$(seq $NPROCS $((2*NPROCS-1)))
-    which gcc-7
-    ln -s `which gcc-7` bin/gcc
-    which g++-7
-    ln -s `which g++-7` bin/g++
+    which gcc-8
+    ln -s `which gcc-8` bin/gcc
+    which g++-8
+    ln -s `which g++-8` bin/g++
     which g++
     g++ -v
 fi
@@ -103,10 +111,12 @@ config_flags="--enable-asan --enable-extrachecks --enable-ccache --enable-sdfpre
 export CFLAGS="-O2 -g1"
 export CXXFLAGS="-w -O2 -g1"
 
+# quarantine_size_mb / malloc_context_size : reduce memory usage to avoid
+# crashing in tests that churn a lot of memory
 # disable leak detection: this requires the container to be run with
 # "--cap-add SYS_PTRACE" or "--privileged"
 # as the leak detector relies on ptrace
-export LSAN_OPTIONS=detect_leaks=0
+export ASAN_OPTIONS="quarantine_size_mb=100:malloc_context_size=4:detect_leaks=0"
 
 echo "config_flags = $config_flags"
 
@@ -115,7 +125,7 @@ export CCACHE_DIR=$HOME/.ccache
 export CCACHE_COMPRESS=true
 export CCACHE_COMPRESSLEVEL=9
 # cache size should be large enough for a full build
-export CCACHE_MAXSIZE=300M
+export CCACHE_MAXSIZE=500M
 export CCACHE_CPP2=true
 
 # purge cache if it's too old
@@ -138,6 +148,14 @@ if [ $d -ne 0 ]
 then
     echo "clang format must be run as part of the pull request, current diff:"
     git diff
+    exit 1
+fi
+
+crlf=$(find . ! \( -type d -o -path './.git/*' -o -path './Builds/*' -o -path './lib/*' \) -print0 | xargs -0 -n1 -P9 file "{}" | grep CRLF || true)
+if [ -n "$crlf" ]
+then
+    echo "Found some files with Windows line endings:"
+    echo "$crlf"
     exit 1
 fi
 

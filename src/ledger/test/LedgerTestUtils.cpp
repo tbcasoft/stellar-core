@@ -9,6 +9,11 @@
 #include "util/Logging.h"
 #include "util/Math.h"
 #include "util/types.h"
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+#include "xdr/Stellar-contract.h"
+#endif
+#include "xdr/Stellar-ledger-entries.h"
+#include <autocheck/generator.hpp>
 #include <locale>
 #include <string>
 #include <xdrpp/autocheck.h>
@@ -94,6 +99,32 @@ randomlyModifyEntry(LedgerEntry& e)
         e.data.claimableBalance().amount = autocheck::generator<int64>{}();
         makeValid(e.data.claimableBalance());
         break;
+    case LIQUIDITY_POOL:
+        e.data.liquidityPool().body.constantProduct().reserveA =
+            autocheck::generator<int64>{}();
+        e.data.liquidityPool().body.constantProduct().reserveB =
+            autocheck::generator<int64>{}();
+        e.data.liquidityPool().body.constantProduct().totalPoolShares =
+            autocheck::generator<int64>{}();
+        e.data.liquidityPool().body.constantProduct().poolSharesTrustLineCount =
+            autocheck::generator<int64>{}();
+        makeValid(e.data.liquidityPool());
+        break;
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONFIG_SETTING:
+    {
+        e.data.configSetting().setting.type(CONFIG_SETTING_TYPE_UINT32);
+        e.data.configSetting().setting.uint32Val() =
+            autocheck::generator<uint32_t>{}();
+        makeValid(e.data.configSetting());
+        break;
+    }
+    case CONTRACT_DATA:
+        e.data.contractData().val.type(SCV_I32);
+        e.data.contractData().val.i32() = autocheck::generator<int32_t>{}();
+        makeValid(e.data.contractData());
+        break;
+#endif
     }
 }
 
@@ -131,7 +162,7 @@ makeValid(AccountEntry& a)
     {
         a.seqNum = -a.seqNum;
     }
-    a.flags = a.flags & MASK_ACCOUNT_FLAGS_V16;
+    a.flags = a.flags & MASK_ACCOUNT_FLAGS_V17;
 
     if (a.ext.v() == 1)
     {
@@ -179,10 +210,27 @@ makeValid(TrustLineEntry& tl)
     }
     tl.limit = std::abs(tl.limit);
     clampLow<int64>(1, tl.limit);
-    tl.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
-    strToAssetCode(tl.asset.alphaNum4().assetCode, "USD");
+
+    switch (tl.asset.type())
+    {
+    case ASSET_TYPE_NATIVE:
+        // ASSET_TYPE_NATIVE is not a valid trustline asset type, so change the
+        // type to a valid one
+        tl.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
+        strToAssetCode(tl.asset.alphaNum4().assetCode, "USD");
+        break;
+    case ASSET_TYPE_CREDIT_ALPHANUM4:
+        strToAssetCode(tl.asset.alphaNum4().assetCode, "USD");
+        break;
+    case ASSET_TYPE_CREDIT_ALPHANUM12:
+        strToAssetCode(tl.asset.alphaNum12().assetCode, "USD12");
+        break;
+    default:
+        break;
+    }
+
     clampHigh<int64_t>(tl.limit, tl.balance);
-    tl.flags = tl.flags & MASK_TRUSTLINE_FLAGS_V16;
+    tl.flags = tl.flags & MASK_TRUSTLINE_FLAGS_V17;
 
     if (tl.ext.v() == 1)
     {
@@ -236,15 +284,43 @@ makeValid(ClaimableBalanceEntry& c)
     c.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
     strToAssetCode(c.asset.alphaNum4().assetCode, "CAD");
 
-    if (Config::CURRENT_LEDGER_PROTOCOL_VERSION < 17)
-    {
-        c.ext.v(0);
-    }
     if (c.ext.v() == 1)
     {
         c.ext.v1().flags = MASK_CLAIMABLE_BALANCE_FLAGS;
     }
 }
+
+void
+makeValid(LiquidityPoolEntry& lp)
+{
+    auto& cp = lp.body.constantProduct();
+    cp.params.assetA.type(ASSET_TYPE_CREDIT_ALPHANUM4);
+    strToAssetCode(cp.params.assetA.alphaNum4().assetCode, "CAD");
+
+    cp.params.assetB.type(ASSET_TYPE_CREDIT_ALPHANUM4);
+    strToAssetCode(cp.params.assetB.alphaNum4().assetCode, "USD");
+
+    cp.params.fee = 30;
+    cp.reserveA = std::abs(cp.reserveA);
+    cp.reserveB = std::abs(cp.reserveB);
+    cp.totalPoolShares = std::abs(cp.totalPoolShares);
+    cp.poolSharesTrustLineCount = std::abs(cp.poolSharesTrustLineCount);
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+void
+makeValid(ConfigSettingEntry& ce)
+{
+    auto ids = xdr::xdr_traits<ConfigSettingID>::enum_values();
+    ce.configSettingID =
+        static_cast<ConfigSettingID>(ids.at(ce.configSettingID % ids.size()));
+}
+
+void
+makeValid(ContractDataEntry& cde)
+{
+}
+#endif
 
 void
 makeValid(std::vector<LedgerHeaderHistoryEntry>& lhv,
@@ -255,7 +331,7 @@ makeValid(std::vector<LedgerHeaderHistoryEntry>& lhv,
     auto prevHash = firstLedger.header.previousLedgerHash;
     auto ledgerSeq = firstLedger.header.ledgerSeq;
 
-    for (auto i = 0; i < lhv.size(); i++)
+    for (size_t i = 0; i < lhv.size(); i++)
     {
         auto& lh = lhv[i];
 
@@ -306,7 +382,7 @@ makeValid(std::vector<LedgerHeaderHistoryEntry>& lhv,
     }
 }
 
-static auto validLedgerEntryGenerator = autocheck::map(
+static auto validLedgerEntryGeneratorMaybeIncludingConfig = autocheck::map(
     [](LedgerEntry&& le, size_t s) {
         auto& led = le.data;
         le.lastModifiedLedgerSeq = le.lastModifiedLedgerSeq & INT32_MAX;
@@ -327,11 +403,45 @@ static auto validLedgerEntryGenerator = autocheck::map(
         case CLAIMABLE_BALANCE:
             makeValid(led.claimableBalance());
             break;
+        case LIQUIDITY_POOL:
+            makeValid(led.liquidityPool());
+            break;
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+        case CONFIG_SETTING:
+            makeValid(led.configSetting());
+            break;
+        case CONTRACT_DATA:
+            makeValid(led.contractData());
+            break;
+#endif
         }
 
         return std::move(le);
     },
     autocheck::generator<LedgerEntry>());
+
+// When compiling the next protocol version we might be able to generate
+// CONFIG_SETTING entries, but we explicitly exclude them from the default
+// generator here because they violate an assumption that the rest of the
+// machinery here makes: that randomly generated keys are (statistically)
+// guaranteed to be disjoint.
+static auto validLedgerEntryGenerator =
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    autocheck::such_that(
+        [](LedgerEntry const& le) { return le.data.type() != CONFIG_SETTING; },
+        validLedgerEntryGeneratorMaybeIncludingConfig);
+#else
+    validLedgerEntryGeneratorMaybeIncludingConfig;
+#endif
+
+static auto ledgerKeyGenerator =
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    autocheck::such_that(
+        [](LedgerKey const& k) { return k.type() != CONFIG_SETTING; },
+        autocheck::generator<LedgerKey>());
+#else
+    autocheck::generator<LedgerKey>();
+#endif
 
 static auto validAccountEntryGenerator = autocheck::map(
     [](AccountEntry&& ae, size_t s) {
@@ -368,6 +478,29 @@ static auto validClaimableBalanceEntryGenerator = autocheck::map(
     },
     autocheck::generator<ClaimableBalanceEntry>());
 
+static auto validLiquidityPoolEntryGenerator = autocheck::map(
+    [](LiquidityPoolEntry&& c, size_t s) {
+        makeValid(c);
+        return std::move(c);
+    },
+    autocheck::generator<LiquidityPoolEntry>());
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+static auto validConfigSettingEntryGenerator = autocheck::map(
+    [](ConfigSettingEntry&& c, size_t s) {
+        makeValid(c);
+        return std::move(c);
+    },
+    autocheck::generator<ConfigSettingEntry>());
+
+static auto validContractDataEntryGenerator = autocheck::map(
+    [](ContractDataEntry&& c, size_t s) {
+        makeValid(c);
+        return std::move(c);
+    },
+    autocheck::generator<ContractDataEntry>());
+#endif
+
 LedgerEntry
 generateValidLedgerEntry(size_t b)
 {
@@ -378,6 +511,19 @@ std::vector<LedgerEntry>
 generateValidLedgerEntries(size_t n)
 {
     static auto vecgen = autocheck::list_of(validLedgerEntryGenerator);
+    return vecgen(n);
+}
+
+LedgerKey
+generateLedgerKey(size_t n)
+{
+    return ledgerKeyGenerator(n);
+}
+
+std::vector<LedgerKey>
+generateLedgerKeys(size_t n)
+{
+    static auto vecgen = autocheck::list_of(ledgerKeyGenerator);
     return vecgen(n);
 }
 
@@ -392,6 +538,19 @@ generateValidAccountEntries(size_t n)
 {
     static auto vecgen = autocheck::list_of(validAccountEntryGenerator);
     return vecgen(n);
+}
+
+TrustLineEntry
+generateNonPoolShareValidTrustLineEntry(size_t b)
+{
+    auto tl = validTrustLineEntryGenerator(b);
+    if (tl.asset.type() == ASSET_TYPE_POOL_SHARE)
+    {
+        tl.asset.type(ASSET_TYPE_CREDIT_ALPHANUM4);
+        strToAssetCode(tl.asset.alphaNum4().assetCode, "USD");
+    }
+
+    return tl;
 }
 
 TrustLineEntry
@@ -447,6 +606,47 @@ generateValidClaimableBalanceEntries(size_t n)
     return vecgen(n);
 }
 
+LiquidityPoolEntry
+generateValidLiquidityPoolEntry(size_t b)
+{
+    return validLiquidityPoolEntryGenerator(b);
+}
+
+std::vector<LiquidityPoolEntry>
+generateValidLiquidityPoolEntries(size_t n)
+{
+    static auto vecgen = autocheck::list_of(validLiquidityPoolEntryGenerator);
+    return vecgen(n);
+}
+
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+ConfigSettingEntry
+generateValidConfigSettingEntry(size_t b)
+{
+    return validConfigSettingEntryGenerator(b);
+}
+
+std::vector<ConfigSettingEntry>
+generateValidConfigSettingEntries(size_t n)
+{
+    static auto vecgen = autocheck::list_of(validConfigSettingEntryGenerator);
+    return vecgen(n);
+}
+
+ContractDataEntry
+generateValidContractDataEntry(size_t b)
+{
+    return validContractDataEntryGenerator(b);
+}
+
+std::vector<ContractDataEntry>
+generateValidContractDataEntries(size_t n)
+{
+    static auto vecgen = autocheck::list_of(validContractDataEntryGenerator);
+    return vecgen(n);
+}
+#endif
+
 std::vector<LedgerHeaderHistoryEntry>
 generateLedgerHeadersForCheckpoint(
     LedgerHeaderHistoryEntry firstLedger, uint32_t size,
@@ -457,6 +657,14 @@ generateLedgerHeadersForCheckpoint(
     auto res = vecgen(size);
     makeValid(res, firstLedger, state);
     return res;
+}
+
+UpgradeType
+toUpgradeType(LedgerUpgrade const& upgrade)
+{
+    auto v = xdr::xdr_to_opaque(upgrade);
+    auto result = UpgradeType{v.begin(), v.end()};
+    return result;
 }
 }
 }

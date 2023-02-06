@@ -24,7 +24,7 @@ Alternatively, branches are organized in the following way:
 For convenience, we also keep a record in the form of release tags of the
  versions that make it to production:
  * pre-releases are versions that get deployed to testnet
- * releases are versions that made it all the way in prod
+ * releases are versions that made it all the way to production
 
 ## Containerized dev environment
 
@@ -32,16 +32,25 @@ We maintain a pre-configured Docker configuration ready for development with VSC
 
 See the [dev container's README](.devcontainer/README.md) for more detail.
 
+## Runtime dependencies
+
+`stellar-core` does not have many dependencies.
+
+If core was configured (see below) to work with Postgresql, a local Postgresql server
+ will need to be deployed to the same host.
+
+To install Postgresql, follow instructions from the [Postgresql download page](https://www.postgresql.org/download/).
+
 ## Build Dependencies
 
-- c++ toolchain and headers that supports c++14
-    - `clang` >= 8.0
-    - `g++` >= 7.0
+- c++ toolchain and headers that supports c++17
+    - `clang` >= 10.0
+    - `g++` >= 8.0
 - `pkg-config`
 - `bison` and `flex`
 - `libpq-dev` unless you `./configure --disable-postgres` in the build step below.
 - 64-bit system
-- `clang-format-8` (for `make format` to work)
+- `clang-format-10` (for `make format` to work)
 - `perl`
 - `libunwind-dev`
 
@@ -52,10 +61,10 @@ You can install the [test toolchain](#adding-the-test-toolchain) to build and ru
 
 Alternatively, if you want to just depend on stock Ubuntu, you will have to build with clang *and* have use `libc++` instead of `libstdc++` when compiling.
 
-Ubuntu 18.04 has clang-8 available, that you can install with
+Ubuntu 18.04 has clang-10 available, that you can install with
 
-    # install clang-8 toolchain
-    sudo apt-get install clang-8
+    # install clang-10 toolchain
+    sudo apt-get install clang-10
 
 After installing packages, head to [building with clang and libc++](#building-with-clang-and-libc).
 
@@ -72,28 +81,37 @@ After installing packages, head to [building with clang and libc++](#building-wi
     # common packages
     sudo apt-get install git build-essential pkg-config autoconf automake libtool bison flex libpq-dev libunwind-dev parallel
     # if using clang
-    sudo apt-get install clang-8
+    sudo apt-get install clang-10
     # clang with libstdc++
-    sudo apt-get install gcc-7
+    sudo apt-get install gcc-8
     # if using g++ or building with libstdc++
-    # sudo apt-get install gcc-7 g++-7 cpp-7
+    # sudo apt-get install gcc-8 g++-8 cpp-8
 
 In order to make changes, you'll need to install the proper version of clang-format.
 
 In order to install the llvm (clang) toolchain, you may have to follow instructions on https://apt.llvm.org/
 
-    sudo apt-get install clang-format-8
+    sudo apt-get install clang-format-10
 
 ### OS X
 When building on OSX, here's some dependencies you'll need:
 - Install xcode
-- Install homebrew
-- brew install libsodium
-- brew install libtool
-- brew install automake
-- brew install pkg-config
-- brew install libpqxx *(If ./configure later complains about libpq missing, try PKG_CONFIG_PATH='/usr/local/lib/pkgconfig')*
-- brew install parallel (required for running tests)
+- Install [homebrew](https://brew.sh)
+- `brew install libsodium`
+- `brew install libtool`
+- `brew install autoconf`
+- `brew install automake`
+- `brew install pkg-config`
+- `brew install libpq` (required for postgres)
+- `brew install openssl` (required for postgres)
+- `brew install parallel` (required for running tests)
+- `brew install ccache` (required for enabling ccache)
+
+You'll also need to configure pkg-config by adding the following to your shell (`.zshenv` or `.zshrc`):
+```zsh
+export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$(brew --prefix)/opt/libpq/lib/pkgconfig"
+export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$(brew --prefix)/opt/openssl@3/lib/pkgconfig"
+```
 
 ### Windows
 See [INSTALL-Windows.md](INSTALL-Windows.md)
@@ -105,7 +123,7 @@ See [INSTALL-Windows.md](INSTALL-Windows.md)
 - `git submodule init`
 - `git submodule update`
 - Type `./autogen.sh`.
-- Type `./configure`   *(If configure complains about compiler versions, try `CXX=clang-8 ./configure` or `CXX=g++-7 ./configure` or similar, depending on your compiler.)*
+- Type `./configure`   *(If configure complains about compiler versions, try `CXX=clang-10 ./configure` or `CXX=g++-8 ./configure` or similar, depending on your compiler.)*
 - Type `make` or `make -j<N>` (where `<N>` is the number of parallel builds, a number less than the number of CPU cores available, e.g. `make -j3`)
 - Type `make check` to run tests.
 - Type `make install` to install.
@@ -116,15 +134,15 @@ On some systems, building with `libc++`, [LLVM's version of the standard library
 
 NB: there are newer versions available of both clang and libc++, you will have to use the versions suited for your system.
 
-You may need to install additional packages for this, for example, on Linux Ubuntu 18.04 LTS with clang-8:
+You may need to install additional packages for this, for example, on Linux Ubuntu 18.04 LTS with clang-10:
 
     # install libc++ headers
-    sudo apt-get install libc++-8-dev libc++abi-8-dev
+    sudo apt-get install libc++-10-dev libc++abi-10-dev
 
 Here are sample steps to achieve this:
 
-    export CC=clang-8
-    export CXX=clang++-8
+    export CC=clang-10
+    export CXX=clang++-10
     export CFLAGS="-O3 -g1 -fno-omit-frame-pointer"
     export CXXFLAGS="$CFLAGS -stdlib=libc++"
     git clone https://github.com/stellar/stellar-core.git
@@ -147,3 +165,13 @@ The GUI depends on the `capstone`, `freetype` and `glfw` libraries and their hea
 
     # On MacOS
     $ brew install capstone freetype2 glfw
+
+## Building with Rust
+
+Configuring with `--enable-next-protocol-version-unsafe-for-production` will build and embed components written in the [Rust](https://rust-lang.org) programming language. These components are currently only enabled when building the "next" protocol, not the "current" one.
+
+Building the Rust components requires the `cargo` package manager and build system, as well as the `rustc` compiler, both version 1.63 or later.
+
+Currently we recommend installing Rust using the Rust project's `rustup` installer, which can be found on [rustup.rs](https://rustup.rs).
+
+We also include a script in the repository `install-rust.sh` that downloads and runs a known version of `rustup` on x64-linux hosts, such as those used for CI and packaging.

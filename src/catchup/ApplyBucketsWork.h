@@ -7,11 +7,6 @@
 #include "bucket/BucketApplicator.h"
 #include "work/Work.h"
 
-namespace medida
-{
-class Meter;
-}
-
 namespace stellar
 {
 
@@ -25,7 +20,7 @@ class ApplyBucketsWork : public BasicWork
 {
     std::map<std::string, std::shared_ptr<Bucket>> const& mBuckets;
     HistoryArchiveState const& mApplyState;
-    bool mHaveCheckedApplyStateValidity{false};
+    std::function<bool(LedgerEntryType)> mEntryTypeFilter;
 
     bool mApplying{false};
     size_t mTotalBuckets{0};
@@ -37,14 +32,12 @@ class ApplyBucketsWork : public BasicWork
     size_t mLastPos{0};
     uint32_t mLevel{0};
     uint32_t mMaxProtocolVersion{0};
+    uint32_t mMinProtocolVersionSeen{UINT32_MAX};
     std::shared_ptr<Bucket const> mSnapBucket;
     std::shared_ptr<Bucket const> mCurrBucket;
     std::unique_ptr<BucketApplicator> mSnapApplicator;
     std::unique_ptr<BucketApplicator> mCurrApplicator;
 
-    medida::Meter& mBucketApplyStart;
-    medida::Meter& mBucketApplySuccess;
-    medida::Meter& mBucketApplyFailure;
     BucketApplicator::Counters mCounters;
 
     void advance(std::string const& name, BucketApplicator& applicator);
@@ -53,11 +46,18 @@ class ApplyBucketsWork : public BasicWork
     void startLevel();
     bool isLevelComplete();
 
+    bool mDelayChecked{false};
+
   public:
     ApplyBucketsWork(
         Application& app,
         std::map<std::string, std::shared_ptr<Bucket>> const& buckets,
         HistoryArchiveState const& applyState, uint32_t maxProtocolVersion);
+    ApplyBucketsWork(
+        Application& app,
+        std::map<std::string, std::shared_ptr<Bucket>> const& buckets,
+        HistoryArchiveState const& applyState, uint32_t maxProtocolVersion,
+        std::function<bool(LedgerEntryType)> onlyApply);
     ~ApplyBucketsWork() = default;
 
     std::string getStatus() const override;
@@ -70,7 +70,5 @@ class ApplyBucketsWork : public BasicWork
     {
         return true;
     };
-    void onFailureRaise() override;
-    void onFailureRetry() override;
 };
 }

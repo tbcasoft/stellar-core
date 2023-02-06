@@ -6,6 +6,7 @@
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
+#include "util/GlobalChecks.h"
 #include <fmt/format.h>
 #include <numeric>
 
@@ -15,14 +16,20 @@ namespace stellar
 static int64_t
 calculateDeltaBalance(LedgerEntry const* current, LedgerEntry const* previous)
 {
-    assert(current || previous);
+    releaseAssert(current || previous);
     auto let = current ? current->data.type() : previous->data.type();
-    if (let == ACCOUNT)
+    switch (let)
     {
+    case ACCOUNT:
         return (current ? current->data.account().balance : 0) -
                (previous ? previous->data.account().balance : 0);
-    }
-    if (let == CLAIMABLE_BALANCE)
+    case TRUSTLINE:
+        break;
+    case OFFER:
+        break;
+    case DATA:
+        break;
+    case CLAIMABLE_BALANCE:
     {
         auto const& asset = current ? current->data.claimableBalance().asset
                                     : previous->data.claimableBalance().asset;
@@ -34,6 +41,40 @@ calculateDeltaBalance(LedgerEntry const* current, LedgerEntry const* previous)
 
         return ((current ? current->data.claimableBalance().amount : 0) -
                 (previous ? previous->data.claimableBalance().amount : 0));
+    }
+    case LIQUIDITY_POOL:
+    {
+        auto const* currentBody =
+            current ? &current->data.liquidityPool().body.constantProduct()
+                    : nullptr;
+        auto const* previousBody =
+            previous ? &previous->data.liquidityPool().body.constantProduct()
+                     : nullptr;
+
+        auto const& assetA =
+            (currentBody ? currentBody : previousBody)->params.assetA;
+        auto const& assetB =
+            (currentBody ? currentBody : previousBody)->params.assetB;
+
+        int64_t delta = 0;
+        if (assetA.type() == ASSET_TYPE_NATIVE)
+        {
+            delta += (currentBody ? currentBody->reserveA : 0) -
+                     (previousBody ? previousBody->reserveA : 0);
+        }
+        if (assetB.type() == ASSET_TYPE_NATIVE)
+        {
+            delta += (currentBody ? currentBody->reserveB : 0) -
+                     (previousBody ? previousBody->reserveB : 0);
+        }
+        return delta;
+    }
+#ifdef ENABLE_NEXT_PROTOCOL_VERSION_UNSAFE_FOR_PRODUCTION
+    case CONTRACT_DATA:
+        break;
+    case CONFIG_SETTING:
+        break;
+#endif
     }
     return 0;
 }
@@ -99,36 +140,41 @@ ConservationOfLumens::checkOnOperationApply(Operation const& operation,
         if (deltaTotalCoins != inflationPayouts + deltaFeePool)
         {
             return fmt::format(
-                "LedgerHeader totalCoins change ({}) did not match"
-                " feePool change ({}) plus inflation payouts ({})",
+                FMT_STRING(
+                    "LedgerHeader totalCoins change ({:d}) did not match"
+                    " feePool change ({:d}) plus inflation payouts ({:d})"),
                 deltaTotalCoins, deltaFeePool, inflationPayouts);
         }
         if (deltaBalances != inflationPayouts)
         {
-            return fmt::format("LedgerEntry account balances change ({}) "
-                               "did not match inflation payouts ({})",
-                               deltaBalances, inflationPayouts);
+            return fmt::format(
+                FMT_STRING("LedgerEntry account balances change ({:d}) "
+                           "did not match inflation payouts ({:d})"),
+                deltaBalances, inflationPayouts);
         }
     }
     else
     {
         if (deltaTotalCoins != 0)
         {
-            return fmt::format("LedgerHeader totalCoins changed from {} to"
-                               " {} without inflation",
-                               lhPrev.totalCoins, lhCurr.totalCoins);
+            return fmt::format(
+                FMT_STRING("LedgerHeader totalCoins changed from {:d} to"
+                           " {:d} without inflation"),
+                lhPrev.totalCoins, lhCurr.totalCoins);
         }
         if (deltaFeePool != 0)
         {
-            return fmt::format("LedgerHeader feePool changed from {} to"
-                               " {} without inflation",
-                               lhPrev.feePool, lhCurr.feePool);
+            return fmt::format(
+                FMT_STRING("LedgerHeader feePool changed from {:d} to"
+                           " {:d} without inflation"),
+                lhPrev.feePool, lhCurr.feePool);
         }
         if (deltaBalances != 0)
         {
-            return fmt::format("LedgerEntry account balances changed by"
-                               " {} without inflation",
-                               deltaBalances);
+            return fmt::format(
+                FMT_STRING("LedgerEntry account balances changed by"
+                           " {:d} without inflation"),
+                deltaBalances);
         }
     }
     return {};

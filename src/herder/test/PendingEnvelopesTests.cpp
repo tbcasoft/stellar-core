@@ -5,6 +5,7 @@
 #include "crypto/SHA.h"
 #include "herder/HerderImpl.h"
 #include "herder/PendingEnvelopes.h"
+#include "herder/test/TestTxSetUtils.h"
 #include "lib/catch.hpp"
 #include "main/Application.h"
 #include "test/TestAccount.h"
@@ -35,11 +36,12 @@ TEST_CASE("PendingEnvelopes recvSCPEnvelope", "[herder]")
 
     auto root = TestAccount::createRoot(*app);
     auto a1 = TestAccount{*app, getAccount("A")};
-    using TxPair = std::pair<Value, TxSetFramePtr>;
-    auto makeTxPair = [&](TxSetFramePtr txSet, uint64_t closeTime) {
-        txSet->sortForHash();
+    using TxPair = std::pair<Value, TxSetFrameConstPtr>;
+    auto makeTxPair = [&](TxSetFrameConstPtr txSet, uint64_t closeTime,
+                          StellarValueType svt) {
         StellarValue sv = herder.makeStellarValue(
             txSet->getContentsHash(), closeTime, emptyUpgradeSteps, s);
+        sv.ext.v(svt);
         auto v = xdr::xdr_to_opaque(sv);
 
         return TxPair{v, txSet};
@@ -59,19 +61,11 @@ TEST_CASE("PendingEnvelopes recvSCPEnvelope", "[herder]")
         herder.signEnvelope(s, envelope);
         return envelope;
     };
-    auto addTransactionsEx = [&](TxSetFramePtr txSet, int n, TestAccount& t) {
-        txSet->mTransactions.resize(n);
-        std::generate(std::begin(txSet->mTransactions),
-                      std::end(txSet->mTransactions),
-                      [&]() { return root.tx({createAccount(t, 10000000)}); });
-    };
-    auto addTransactions = std::bind(addTransactionsEx, std::placeholders::_1,
-                                     std::placeholders::_2, a1);
-
     auto makeTransactions = [&](Hash hash, int n) {
-        auto result = std::make_shared<TxSetFrame>(hash);
-        addTransactions(result, n);
-        return result;
+        std::vector<TransactionFrameBasePtr> txs(n);
+        std::generate(std::begin(txs), std::end(txs),
+                      [&]() { return root.tx({createAccount(a1, 10000000)}); });
+        return TxSetFrame::makeFromTransactions(txs, *app, 0, 0);
     };
 
     auto makePublicKey = [](int i) {
@@ -108,8 +102,8 @@ TEST_CASE("PendingEnvelopes recvSCPEnvelope", "[herder]")
     }
     auto bigQSetHash = sha256(xdr::xdr_to_opaque(bigQSet));
 
-    auto transactions = makeTransactions(lcl.hash, 50);
-    auto p = makeTxPair(transactions, 10);
+    auto txSet = makeTransactions(lcl.hash, 50);
+    auto p = makeTxPair(txSet, 10, STELLAR_VALUE_SIGNED);
     auto saneEnvelope = makeEnvelope(p, saneQSetHash, lcl.header.ledgerSeq + 1);
     auto bigEnvelope = makeEnvelope(p, bigQSetHash, lcl.header.ledgerSeq + 1);
 
@@ -280,14 +274,14 @@ TEST_CASE("PendingEnvelopes recvSCPEnvelope", "[herder]")
             pendingEnvelopes.eraseBelow(minSlot);
             auto saneQSetP = pendingEnvelopes.getQSet(saneQSetHash);
 
-            // 3 as we have "p", "transactions" and SCP
-            REQUIRE(transactions.use_count() == 3);
+            // 3 as we have "p", "txSet" and SCP
+            REQUIRE(txSet.use_count() == 3);
             // 4 as we have "saneQSetP", SCP, cache and quorum tracker
             REQUIRE(saneQSetP.use_count() == 4);
 
             // clears SCP
             herder.getSCP().purgeSlots(minSlot);
-            REQUIRE(transactions.use_count() == 2);
+            REQUIRE(txSet.use_count() == 2);
             REQUIRE(saneQSetP.use_count() == 3);
 
             SECTION("With txset references")
@@ -312,10 +306,37 @@ TEST_CASE("PendingEnvelopes recvSCPEnvelope", "[herder]")
             {
                 // remove all references to that txset
                 p.second.reset();
-                transactions.reset();
+                txSet.reset();
                 REQUIRE(pendingEnvelopes.recvSCPEnvelope(saneEnvelope3) ==
                         Herder::ENVELOPE_STATUS_FETCHING);
             }
         }
+    }
+
+    SECTION("do not fetch if txsets are not signed")
+    {
+        auto p2 = makeTxPair(txSet, 10, STELLAR_VALUE_BASIC);
+        auto envNoSign =
+            makeEnvelope(p2, saneQSetHash, lcl.header.ledgerSeq + 1);
+
+        // Make sure to discard the envelope
+        REQUIRE(pendingEnvelopes.recvSCPEnvelope(envNoSign) ==
+                Herder::ENVELOPE_STATUS_DISCARDED);
+    }
+
+    SECTION("can receive malformed tx set")
+    {
+        GeneralizedTransactionSet malformedXdrSet(1);
+        auto malformedTxSet =
+            TxSetFrame::makeFromWire(app->getNetworkID(), malformedXdrSet);
+        auto p2 = makeTxPair(malformedTxSet, 10, STELLAR_VALUE_SIGNED);
+        auto malformedEnvelope =
+            makeEnvelope(p2, saneQSetHash, lcl.header.ledgerSeq + 1);
+        REQUIRE(pendingEnvelopes.recvSCPEnvelope(malformedEnvelope) ==
+                Herder::ENVELOPE_STATUS_FETCHING);
+        REQUIRE(pendingEnvelopes.recvSCPQuorumSet(saneQSetHash, saneQSet));
+        REQUIRE(herder.getSCP().getLatestMessage(pk) == nullptr);
+        REQUIRE(pendingEnvelopes.recvTxSet(p2.second->getContentsHash(),
+                                           p2.second));
     }
 }

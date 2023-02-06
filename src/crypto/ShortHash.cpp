@@ -14,7 +14,9 @@ namespace shortHash
 static unsigned char gKey[crypto_shorthash_KEYBYTES];
 static std::mutex gKeyMutex;
 static bool gHaveHashed{false};
+#ifdef BUILD_TESTS
 static unsigned int gExplicitSeed{0};
+#endif
 
 void
 initialize()
@@ -31,10 +33,11 @@ seed(unsigned int s)
     {
         if (gExplicitSeed != s)
         {
-            throw std::runtime_error(
-                fmt::format("re-seeding shortHash with {} after having already "
-                            "hashed with seed {}",
-                            s, gExplicitSeed));
+            throw std::runtime_error(fmt::format(
+                FMT_STRING(
+                    "re-seeding shortHash with {:d} after having already "
+                    "hashed with seed {:d}"),
+                s, gExplicitSeed));
         }
     }
     gExplicitSeed = s;

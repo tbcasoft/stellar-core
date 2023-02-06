@@ -10,6 +10,7 @@
 #include "overlay/OverlayManager.h"
 #include "scp/QuorumSetUtils.h"
 #include "scp/Slot.h"
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/UnorderedSet.h"
 #include <Tracy.hpp>
@@ -60,6 +61,7 @@ PendingEnvelopes::peerDoesntHave(MessageType type, Hash const& itemID,
     switch (type)
     {
     case TX_SET:
+    case GENERALIZED_TX_SET:
         mTxSetFetcher.doesntHave(itemID, peer);
         break;
     case SCP_QUORUMSET:
@@ -95,7 +97,7 @@ PendingEnvelopes::putQSet(Hash const& qSetHash, SCPQuorumSet const& qSet)
     CLOG_TRACE(Herder, "Add SCPQSet {}", hexAbbrev(qSetHash));
     SCPQuorumSetPtr res;
     const char* errString = nullptr;
-    assert(isQuorumSetSane(qSet, false, errString));
+    releaseAssert(isQuorumSetSane(qSet, false, errString));
     res = getKnownQSet(qSetHash, true);
     if (!res)
     {
@@ -175,8 +177,9 @@ PendingEnvelopes::updateMetrics()
     mReadyCount.set_count(ready);
 }
 
-TxSetFramePtr
-PendingEnvelopes::putTxSet(Hash const& hash, uint64 slot, TxSetFramePtr txset)
+TxSetFrameConstPtr
+PendingEnvelopes::putTxSet(Hash const& hash, uint64 slot,
+                           TxSetFrameConstPtr txset)
 {
     auto res = getKnownTxSet(hash, slot, true);
     if (!res)
@@ -191,12 +194,12 @@ PendingEnvelopes::putTxSet(Hash const& hash, uint64 slot, TxSetFramePtr txset)
 // tries to find a txset in memory, setting touch also touches the LRU,
 // extending the lifetime of the result *and* updating the slot number
 // to a greater value if needed
-TxSetFramePtr
+TxSetFrameConstPtr
 PendingEnvelopes::getKnownTxSet(Hash const& hash, uint64 slot, bool touch)
 {
     // slot is only used when `touch` is set
-    assert(touch || (slot == 0));
-    TxSetFramePtr res;
+    releaseAssert(touch || (slot == 0));
+    TxSetFrameConstPtr res;
     auto it = mKnownTxSets.find(hash);
     if (it != mKnownTxSets.end())
     {
@@ -222,7 +225,7 @@ PendingEnvelopes::getKnownTxSet(Hash const& hash, uint64 slot, bool touch)
 
 void
 PendingEnvelopes::addTxSet(Hash const& hash, uint64 lastSeenSlotIndex,
-                           TxSetFramePtr txset)
+                           TxSetFrameConstPtr txset)
 {
     ZoneScoped;
     CLOG_TRACE(Herder, "Add TxSet {}", hexAbbrev(hash));
@@ -232,7 +235,7 @@ PendingEnvelopes::addTxSet(Hash const& hash, uint64 lastSeenSlotIndex,
 }
 
 bool
-PendingEnvelopes::recvTxSet(Hash const& hash, TxSetFramePtr txset)
+PendingEnvelopes::recvTxSet(Hash const& hash, TxSetFrameConstPtr txset)
 {
     ZoneScoped;
     CLOG_TRACE(Herder, "Got TxSet {}", hexAbbrev(hash));
@@ -281,6 +284,16 @@ PendingEnvelopes::recvSCPEnvelope(SCPEnvelope const& envelope)
     if (!isNodeDefinitelyInQuorum(nodeID))
     {
         CLOG_TRACE(Herder, "Dropping envelope from {} (not in quorum)",
+                   mApp.getConfig().toShortString(nodeID));
+        return Herder::ENVELOPE_STATUS_DISCARDED;
+    }
+
+    auto const& values = getStellarValues(envelope.statement);
+    if (std::any_of(values.begin(), values.end(), [](auto const& value) {
+            return value.ext.v() != STELLAR_VALUE_SIGNED;
+        }))
+    {
+        CLOG_TRACE(Herder, "Dropping envelope from {} (value not signed)",
                    mApp.getConfig().toShortString(nodeID));
         return Herder::ENVELOPE_STATUS_DISCARDED;
     }
@@ -470,9 +483,7 @@ PendingEnvelopes::recordReceivedCost(SCPEnvelope const& env)
             auto txSetPtr = getTxSet(v.txSetHash);
             if (txSetPtr)
             {
-                TransactionSet txSet;
-                txSetPtr->toXDR(txSet);
-                txSetSize = xdr::xdr_argpack_size(txSet);
+                txSetSize = txSetPtr->encodedSize();
                 mValueSizeCache.put(v.txSetHash, txSetSize);
             }
         }
@@ -696,7 +707,7 @@ PendingEnvelopes::forceRebuildQuorum()
     mRebuildQuorum = true;
 }
 
-TxSetFramePtr
+TxSetFrameConstPtr
 PendingEnvelopes::getTxSet(Hash const& hash)
 {
     return getKnownTxSet(hash, 0, false);

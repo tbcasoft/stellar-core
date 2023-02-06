@@ -8,20 +8,27 @@
 #include "database/Database.h"
 #include "database/DatabaseUtils.h"
 #include "util/Decoder.h"
+#include "util/GlobalChecks.h"
+#include "util/Logging.h"
 #include "util/XDRStream.h"
 #include "util/types.h"
 #include "xdrpp/marshal.h"
+
 #include <Tracy.hpp>
 #include <fmt/format.h>
 #include <util/basen.h>
-
-#include "util/Logging.h"
 
 namespace stellar
 {
 
 namespace LedgerHeaderUtils
 {
+
+uint32_t
+getFlags(LedgerHeader const& lh)
+{
+    return lh.ext.v() == 1 ? lh.ext.v1().flags : 0;
+}
 
 bool
 isValid(LedgerHeader const& lh)
@@ -51,7 +58,7 @@ storeInDatabase(Database& db, LedgerHeader const& header)
     std::string headerEncoded;
     headerEncoded = decoder::encode_b64(headerBytes);
 
-    // note: columns other than "data" are there to faciliate lookup/processing
+    // note: columns other than "data" are there to facilitate lookup/processing
     auto prep = db.getPreparedStatement(
         "INSERT INTO ledgerheaders "
         "(ledgerhash, prevhash, bucketlisthash, ledgerseq, closetime, data) "
@@ -66,7 +73,7 @@ storeInDatabase(Database& db, LedgerHeader const& header)
     st.exchange(soci::use(headerEncoded));
     st.define_and_bind();
     {
-        auto timer = db.getInsertTimer("ledger-header");
+        ZoneNamedN(insertLedgerHeadersZone, "insert ledgerheaders", true);
         st.execute(true);
     }
     if (st.get_affected_rows() != 1)
@@ -110,7 +117,7 @@ loadByHash(Database& db, Hash const& hash)
     st.exchange(soci::use(hash_s));
     st.define_and_bind();
     {
-        auto timer = db.getSelectTimer("ledger-header");
+        ZoneNamedN(selectLedgerHeadersZone, "select ledgerheaders", true);
         st.execute(true);
     }
     if (st.got_data())
@@ -121,8 +128,8 @@ loadByHash(Database& db, Hash const& hash)
         if (ledgerHash != hash)
         {
             throw std::runtime_error(
-                fmt::format("Wrong hash in ledger header database: "
-                            "loaded ledger {} contains {}",
+                fmt::format(FMT_STRING("Wrong hash in ledger header database: "
+                                       "loaded ledger {} contains {}"),
                             binToHex(ledgerHash), binToHex(hash)));
         }
     }
@@ -138,7 +145,7 @@ loadBySequence(Database& db, soci::session& sess, uint32_t seq)
 
     std::string headerEncoded;
     {
-        auto timer = db.getSelectTimer("ledger-header");
+        ZoneNamedN(selectLedgerHeadersZone, "select ledgerheaders", true);
         sess << "SELECT data FROM ledgerheaders "
                 "WHERE ledgerseq = :s",
             soci::into(headerEncoded), soci::use(seq);
@@ -150,10 +157,10 @@ loadBySequence(Database& db, soci::session& sess, uint32_t seq)
 
         if (lh.ledgerSeq != seq)
         {
-            throw std::runtime_error(
-                fmt::format("Wrong sequence number in ledger header database: "
-                            "loaded ledger {} contains {}",
-                            seq, lh.ledgerSeq));
+            throw std::runtime_error(fmt::format(
+                FMT_STRING("Wrong sequence number in ledger header database: "
+                           "loaded ledger {:d} contains {:d}"),
+                seq, lh.ledgerSeq));
         }
     }
 
@@ -180,13 +187,12 @@ size_t
 copyToStream(Database& db, soci::session& sess, uint32_t ledgerSeq,
              uint32_t ledgerCount, XDROutputFileStream& headersOut)
 {
-    ZoneScoped;
+    ZoneNamedN(selectLedgerHeadersZone, "select ledgerheaders history", true);
     uint32_t begin = ledgerSeq, end = ledgerSeq + ledgerCount;
-    assert(begin <= end);
+    releaseAssert(begin <= end);
 
     std::string headerEncoded;
 
-    auto timer = db.getSelectTimer("ledger-header-history");
     soci::statement st =
         (sess.prepare << "SELECT data FROM ledgerheaders "
                          "WHERE ledgerseq >= :begin AND ledgerseq < :end ORDER "

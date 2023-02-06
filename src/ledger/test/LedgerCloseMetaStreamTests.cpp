@@ -6,6 +6,7 @@
 #include "crypto/Random.h"
 #include "history/HistoryArchiveManager.h"
 #include "history/test/HistoryTestsUtils.h"
+#include "ledger/FlushAndRotateMetaDebugWork.h"
 #include "ledger/LedgerTxn.h"
 #include "ledger/test/LedgerTestUtils.h"
 #include "lib/catch.hpp"
@@ -15,6 +16,7 @@
 #include "test/TestUtils.h"
 #include "test/test.h"
 #include "util/Logging.h"
+#include "work/WorkScheduler.h"
 #include "xdr/Stellar-ledger.h"
 #include <fmt/format.h>
 #include <fstream>
@@ -36,7 +38,7 @@ TEST_CASE("LedgerCloseMetaStream file descriptor - LIVE_NODE",
     std::string path = td.getName() + "/stream.xdr";
     std::string pathSafe = td.getName() + "/streamSafe.xdr";
 
-    auto const ledgerToWaitFor = 10;
+    uint32 const ledgerToWaitFor = 10;
 
     bool const induceOneLedgerFork = GENERATE(false, true);
     CAPTURE(induceOneLedgerFork);
@@ -191,12 +193,28 @@ TEST_CASE("LedgerCloseMetaStream file descriptor - LIVE_NODE",
     auto lcmsSafe = readLcms(pathSafe);
     // The "- 1" is because we don't stream meta for the genesis ledger.
     REQUIRE(lcms.size() == expectedLastWatcherLedger - 1);
-    REQUIRE(lcms.back().v0().ledgerHeader.hash == expectedLastUnsafeHash);
+    if (lcms.back().v() == 0)
+    {
+        REQUIRE(lcms.back().v0().ledgerHeader.hash == expectedLastUnsafeHash);
+    }
+    else
+    {
+        REQUIRE(lcms.back().v1().ledgerHeader.hash == expectedLastUnsafeHash);
+    }
+
     // The node with EXPERIMENTAL_PRECAUTION_DELAY_META should not have streamed
     // the meta for the latest ledger (or the latest ledger before the corrupt
     // one) yet.
     REQUIRE(lcmsSafe.size() == lcms.size() - 1);
-    REQUIRE(lcmsSafe.back().v0().ledgerHeader.hash == expectedLastSafeHash);
+
+    if (lcmsSafe.back().v() == 0)
+    {
+        REQUIRE(lcmsSafe.back().v0().ledgerHeader.hash == expectedLastSafeHash);
+    }
+    else
+    {
+        REQUIRE(lcmsSafe.back().v1().ledgerHeader.hash == expectedLastSafeHash);
+    }
     REQUIRE(lcmsSafe ==
             std::vector<LedgerCloseMeta>(lcms.begin(), lcms.end() - 1));
 }
@@ -219,7 +237,6 @@ TEST_CASE("LedgerCloseMetaStream file descriptor - REPLAY_IN_MEMORY",
         {
             genClock.crank(false);
         }
-        genApp->start();
         auto& genHm = genApp->getHistoryManager();
         while (genHm.getPublishSuccessCount() < 5)
         {
@@ -293,7 +310,14 @@ TEST_CASE("LedgerCloseMetaStream file descriptor - REPLAY_IN_MEMORY",
     }
     // 5 checkpoints is ledger 0x13f
     REQUIRE(nLcm == 0x13f);
-    REQUIRE(lcm.v0().ledgerHeader.hash == hash);
+    if (lcm.v() == 0)
+    {
+        REQUIRE(lcm.v0().ledgerHeader.hash == hash);
+    }
+    else
+    {
+        REQUIRE(lcm.v1().ledgerHeader.hash == hash);
+    }
 }
 
 TEST_CASE("EXPERIMENTAL_PRECAUTION_DELAY_META configuration",
@@ -313,7 +337,7 @@ TEST_CASE("EXPERIMENTAL_PRECAUTION_DELAY_META configuration",
         {
             cfg.setInMemoryMode();
         }
-        REQUIRE_NOTHROW(createTestApplication(clock, cfg)->start());
+        REQUIRE_NOTHROW(createTestApplication(clock, cfg));
     }
 
     SECTION("EXPERIMENTAL_PRECAUTION_DELAY_META together with "
@@ -342,12 +366,46 @@ TEST_CASE("EXPERIMENTAL_PRECAUTION_DELAY_META configuration",
         }
         if (delayMeta && !inMemory)
         {
-            REQUIRE_THROWS_AS(createTestApplication(clock, cfg)->start(),
+            REQUIRE_THROWS_AS(createTestApplication(clock, cfg),
                               std::invalid_argument);
         }
         else
         {
-            REQUIRE_NOTHROW(createTestApplication(clock, cfg)->start());
+            REQUIRE_NOTHROW(createTestApplication(clock, cfg));
         }
     }
+}
+
+TEST_CASE("METADATA_DEBUG_LEDGERS works", "[metadebug]")
+{
+    VirtualClock clock;
+    Config cfg = getTestConfig();
+    cfg.MANUAL_CLOSE = false;
+    cfg.METADATA_DEBUG_LEDGERS = 768;
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+    auto bucketDir = app->getBucketManager().getBucketDir();
+    auto n = FlushAndRotateMetaDebugWork::getNumberOfDebugFilesToKeep(
+        cfg.METADATA_DEBUG_LEDGERS);
+    bool gotToExpectedSize = false;
+    auto& lm = app->getLedgerManager();
+    while (lm.getLastClosedLedgerNum() < (2 * cfg.METADATA_DEBUG_LEDGERS))
+    {
+        clock.crank(false);
+        if (app->getWorkScheduler().allChildrenDone())
+        {
+            auto files =
+                FlushAndRotateMetaDebugWork::listMetaDebugFiles(bucketDir);
+            REQUIRE(files.size() <= n);
+            if (files.size() == n)
+            {
+                gotToExpectedSize = true;
+            }
+        }
+    }
+    while (!app->getWorkScheduler().allChildrenDone())
+    {
+        clock.crank(false);
+    }
+    REQUIRE(gotToExpectedSize);
 }

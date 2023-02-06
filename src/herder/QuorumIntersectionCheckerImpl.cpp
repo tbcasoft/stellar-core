@@ -5,6 +5,7 @@
 #include "QuorumIntersectionCheckerImpl.h"
 #include "QuorumIntersectionChecker.h"
 
+#include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 
@@ -52,82 +53,6 @@ QBitSet::getSuccessors(BitSet const& nodes, QGraph const& inner)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Implementation of TarjanSCCCalculator
-////////////////////////////////////////////////////////////////////////////////
-//
-// This is a completely stock implementation of Tarjan's algorithm for
-// calculating strongly connected components. Like "read off of wikipedia"
-// stock. Go have a look!
-//
-// https://en.wikipedia.org/wiki/Tarjan%27s_strongly_connected_components_algorithm
-
-TarjanSCCCalculator::TarjanSCCCalculator(QGraph const& graph) : mGraph(graph)
-{
-}
-
-void
-TarjanSCCCalculator::calculateSCCs()
-{
-    mNodes.clear();
-    mStack.clear();
-    mIndex = 0;
-    mSCCs.clear();
-    for (size_t i = 0; i < mGraph.size(); ++i)
-    {
-        mNodes.emplace_back(SCCNode{});
-    }
-    for (size_t i = 0; i < mGraph.size(); ++i)
-    {
-        if (mNodes.at(i).mIndex == -1)
-        {
-            scc(i);
-        }
-    }
-}
-
-void
-TarjanSCCCalculator::scc(size_t i)
-{
-    auto& v = mNodes.at(i);
-    v.mIndex = mIndex;
-    v.mLowLink = mIndex;
-    mIndex++;
-    mStack.push_back(i);
-    v.mOnStack = true;
-
-    BitSet const& succ = mGraph.at(i).mAllSuccessors;
-    for (size_t j = 0; succ.nextSet(j); ++j)
-    {
-        CLOG_TRACE(SCP, "edge: {} -> {}", i, j);
-        SCCNode& w = mNodes.at(j);
-        if (w.mIndex == -1)
-        {
-            scc(j);
-            v.mLowLink = std::min(v.mLowLink, w.mLowLink);
-        }
-        else if (w.mOnStack)
-        {
-            v.mLowLink = std::min(v.mLowLink, w.mIndex);
-        }
-    }
-
-    if (v.mLowLink == v.mIndex)
-    {
-        BitSet newScc;
-        newScc.set(i);
-        size_t j = 0;
-        do
-        {
-            j = mStack.back();
-            newScc.set(j);
-            mStack.pop_back();
-            mNodes.at(j).mOnStack = false;
-        } while (j != i);
-        mSCCs.push_back(newScc);
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
 // Implementation of MinQuorumEnumerator
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -137,7 +62,7 @@ MinQuorumEnumerator::pickSplitNode() const
 {
     std::vector<size_t>& inDegrees = mQic.mInDegrees;
     inDegrees.assign(mQic.mGraph.size(), 0);
-    assert(!mRemaining.empty());
+    releaseAssert(!mRemaining.empty());
     size_t maxNode = mRemaining.max();
     size_t maxCount = 1;
     size_t maxDegree = 0;
@@ -346,15 +271,17 @@ QuorumIntersectionCheckerImpl::QuorumIntersectionCheckerImpl(
     : mCfg(cfg)
     , mLogTrace(Logging::logTrace("SCP"))
     , mQuiet(quiet)
-    , mTSC(mGraph)
+    , mTSC()
     , mInterruptFlag(interruptFlag)
     , mCachedQuorums(MAX_CACHED_QUORUMS_SIZE)
 {
     buildGraph(qmap);
+    // Awkwardly, the graph size is zero when we initialize mTSC. Update it
+    // here.
     buildSCCs();
 }
 
-std::pair<std::vector<PublicKey>, std::vector<PublicKey>>
+std::pair<std::vector<NodeID>, std::vector<NodeID>>
 QuorumIntersectionCheckerImpl::getPotentialSplit() const
 {
     return mPotentialSplit;
@@ -528,7 +455,7 @@ QuorumIntersectionCheckerImpl::isMinimalQuorum(BitSet const& nodes) const
 #ifndef NDEBUG
     // We should only be called with a quorum, such that contracting to its
     // maximum doesn't do anything. This is a slightly expensive check.
-    assert(contractToMaximalQuorum(nodes) == nodes);
+    releaseAssert(contractToMaximalQuorum(nodes) == nodes);
 #endif
 
     BitSet minQ = nodes;
@@ -679,9 +606,9 @@ QuorumIntersectionCheckerImpl::buildGraph(QuorumTracker::QuorumMap const& qmap)
         if (pair.second.mQuorumSet)
         {
             auto i = mPubKeyBitNums.find(pair.first);
-            assert(i != mPubKeyBitNums.end());
+            releaseAssert(i != mPubKeyBitNums.end());
             auto nodeNum = i->second;
-            assert(nodeNum == mGraph.size());
+            releaseAssert(nodeNum == mGraph.size());
             auto qb = convertSCPQuorumSet(*(pair.second.mQuorumSet));
             qb.log();
             mGraph.emplace_back(qb);
@@ -693,7 +620,12 @@ QuorumIntersectionCheckerImpl::buildGraph(QuorumTracker::QuorumMap const& qmap)
 void
 QuorumIntersectionCheckerImpl::buildSCCs()
 {
-    mTSC.calculateSCCs();
+    mTSC.calculateSCCs(mGraph.size(), [this](size_t i) -> BitSet const& {
+        // NB: this closure must be written with the explicit const&
+        // returning type signature, otherwise it infers wrong and
+        // winds up returning a dangling reference at its site of use.
+        return this->mGraph.at(i).mAllSuccessors;
+    });
     mStats.mNumSCCs = mTSC.mSCCs.size();
 }
 
@@ -706,9 +638,9 @@ QuorumIntersectionCheckerImpl::nodeName(size_t node) const
 bool
 QuorumIntersectionCheckerImpl::networkEnjoysQuorumIntersection() const
 {
-    size_t nNodes = mPubKeyBitNums.size();
     if (!mQuiet)
     {
+        size_t nNodes = mPubKeyBitNums.size();
         CLOG_INFO(SCP, "Calculating {}-node network quorum intersection",
                   nNodes);
     }
@@ -782,7 +714,7 @@ QuorumIntersectionCheckerImpl::networkEnjoysQuorumIntersection() const
 }
 
 bool
-pointsToCandidate(SCPQuorumSet const& p, PublicKey const& candidate)
+pointsToCandidate(SCPQuorumSet const& p, NodeID const& candidate)
 {
     for (auto const& k : p.validators)
     {
@@ -803,12 +735,12 @@ pointsToCandidate(SCPQuorumSet const& p, PublicKey const& candidate)
 
 void
 findCriticalityCandidates(SCPQuorumSet const& p,
-                          std::set<std::set<PublicKey>>& candidates, bool root)
+                          std::set<std::set<NodeID>>& candidates, bool root)
 {
     // Make a singleton-set for every validator, always.
     for (auto const& k : p.validators)
     {
-        std::set<PublicKey> singleton{k};
+        std::set<NodeID> singleton{k};
         candidates.insert(singleton);
     }
 
@@ -816,7 +748,7 @@ findCriticalityCandidates(SCPQuorumSet const& p,
     // record it!
     if (!root && p.innerSets.empty())
     {
-        std::set<PublicKey> inner;
+        std::set<NodeID> inner;
         for (auto const& k : p.validators)
         {
             inner.insert(k);
@@ -832,7 +764,7 @@ findCriticalityCandidates(SCPQuorumSet const& p,
 }
 
 std::string
-groupString(Config const& cfg, std::set<PublicKey> const& group)
+groupString(Config const& cfg, std::set<NodeID> const& group)
 {
     std::ostringstream out;
     bool first = true;
@@ -862,7 +794,7 @@ QuorumIntersectionChecker::create(QuorumTracker::QuorumMap const& qmap,
         qmap, cfg, interruptFlag, quiet);
 }
 
-std::set<std::set<PublicKey>>
+std::set<std::set<NodeID>>
 QuorumIntersectionChecker::getIntersectionCriticalGroups(
     stellar::QuorumTracker::QuorumMap const& qmap, stellar::Config const& cfg,
     std::atomic<bool>& interruptFlag)
@@ -892,8 +824,8 @@ QuorumIntersectionChecker::getIntersectionCriticalGroups(
     // that asks, but still counts as an intersecting member of any two quorums
     // it's a member of.
 
-    std::set<std::set<PublicKey>> candidates;
-    std::set<std::set<PublicKey>> critical;
+    std::set<std::set<NodeID>> candidates;
+    std::set<std::set<NodeID>> critical;
     QuorumTracker::QuorumMap test_qmap(qmap);
 
     for (auto const& k : qmap)
@@ -922,8 +854,8 @@ QuorumIntersectionChecker::getIntersectionCriticalGroups(
         }
         groupQSet.threshold = static_cast<uint32>(group.size());
 
-        std::set<PublicKey> pointsToGroup;
-        for (PublicKey const& candidate : group)
+        std::set<NodeID> pointsToGroup;
+        for (NodeID const& candidate : group)
         {
             for (auto const& d : qmap)
             {
