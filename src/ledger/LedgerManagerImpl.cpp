@@ -607,8 +607,8 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     auto header = ltx.loadHeader();
     ++header.current().ledgerSeq;
     header.current().previousLedgerHash = mLastClosedLedger.hash;
-    CLOG_DEBUG(Ledger, "starting closeLedger() on ledgerSeq={}",
-               header.current().ledgerSeq);
+     CLOG_INFO(Ledger, "====   starting closeLedger() on ledgerSeq={}",
+                header.current().ledgerSeq);
 
     ZoneValue(static_cast<int64_t>(header.current().ledgerSeq));
 
@@ -808,16 +808,21 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
 
     // step 1
     auto& hm = mApp.getHistoryManager();
+    CLOG_INFO(Ledger, "About to Queue any history-checkpoint to the database for current ledger");
     hm.maybeQueueHistoryCheckpoint();
 
     // step 2
+    CLOG_INFO(Ledger, "About to commit the current ledger");
     ltx.commit();
 
     // step 3
+     CLOG_INFO(Ledger, "About to publish any checkpoints queued in the database.");
     hm.publishQueuedHistory();
+    CLOG_INFO(Ledger, "About to emit log message and updated status to HISTORY_PUBLISH to desvcribe current publishing state");
     hm.logAndUpdatePublishStatus();
 
     // step 4
+    CLOG_INFO(Ledger, "About to forget any buckets not referenced by the current bucket list.  Unreferenced buckets will eventually be delreted.");
     mApp.getBucketManager().forgetUnreferencedBuckets();
 
     if (!mApp.getConfig().OP_APPLY_SLEEP_TIME_WEIGHT_FOR_TESTING.empty())
@@ -840,14 +845,14 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
         if (applicationTime < sleepFor)
         {
             sleepFor -= applicationTime;
-            CLOG_DEBUG(Perf, "Simulate application: sleep for {} microseconds",
+            CLOG_WARNING(Perf, "Simulate application: sleep for {} microseconds",
                        sleepFor.count());
             std::this_thread::sleep_for(sleepFor);
         }
     }
 
     std::chrono::duration<double> ledgerTimeSeconds = ledgerTime.Stop();
-    CLOG_DEBUG(Perf, "Applied ledger in {} seconds", ledgerTimeSeconds.count());
+    CLOG_INFO(Perf, "=== Applied ledger in {} seconds", ledgerTimeSeconds.count());
 }
 
 void

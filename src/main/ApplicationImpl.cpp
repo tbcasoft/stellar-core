@@ -1272,7 +1272,7 @@ ApplicationImpl::postOnMainThread(std::function<void()>&& f, std::string&& name,
                                   Scheduler::ActionType type)
 {
     LogSlowExecution isSlow{name, LogSlowExecution::Mode::MANUAL,
-                            "executed after"};
+                            "slow execution of task on main thread - executed after"};
     mVirtualClock.postAction(
         [this, f = std::move(f), isSlow]() {
             mPostOnMainThreadDelay.Update(isSlow.checkElapsedTime());
@@ -1292,7 +1292,7 @@ ApplicationImpl::postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName)
 {
     LogSlowExecution isSlow{std::move(jobName), LogSlowExecution::Mode::MANUAL,
-                            "executed after"};
+                            "slow execution of task on bgthread - executed after"};
     asio::post(getWorkerIOContext(), [this, f = std::move(f), isSlow]() {
         mPostOnBackgroundThreadDelay.Update(isSlow.checkElapsedTime());
         f();

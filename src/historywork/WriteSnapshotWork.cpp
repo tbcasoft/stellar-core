@@ -13,6 +13,10 @@
 namespace stellar
 {
 
+/*
+WriteSnapshotWork is a  type of task.  See BasicWork.h for comments on how this task is managed.
+*/
+
 // Note, WriteSnapshotWork does not have any special retry clean-up logic:
 // history items are written via XDROutputFileStream, which automatically
 // truncates any existing files.
