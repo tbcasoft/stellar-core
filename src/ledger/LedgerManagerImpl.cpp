@@ -534,8 +534,8 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     auto header = ltx.loadHeader();
     ++header.current().ledgerSeq;
     header.current().previousLedgerHash = mLastClosedLedger.hash;
-    CLOG_DEBUG(Ledger, "starting closeLedger() on ledgerSeq={}",
-               header.current().ledgerSeq);
+    CLOG_INFO(Ledger, "Is main thread? {}:  ====   starting closeLedger() on ledgerSeq={}",
+            threadIsMain(), header.current().ledgerSeq);
 
     ZoneValue(static_cast<int64_t>(header.current().ledgerSeq));
 
@@ -727,16 +727,23 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
 
     // step 1
     auto& hm = mApp.getHistoryManager();
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to Queue any history-checkpoint to the database for current ledger", threadIsMain());
     hm.maybeQueueHistoryCheckpoint();
 
     // step 2
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to commit the current ledger", threadIsMain());
     ltx.commit();
 
     // step 3
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to publish any checkpoints queued in the database.", threadIsMain());
     hm.publishQueuedHistory();
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to emit log message and updated status to HISTORY_PUBLISH to desvcribe current publishing state"
+        , threadIsMain());
     hm.logAndUpdatePublishStatus();
 
     // step 4
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to forget any buckets not referenced by the current bucket list.  Unreferenced buckets will eventually be delreted."
+        , threadIsMain());
     mApp.getBucketManager().forgetUnreferencedBuckets();
 
     // Maybe sleep for parameterized amount of time in simulation mode
@@ -747,13 +754,13 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     if (applicationTime < sleepFor)
     {
         sleepFor -= applicationTime;
-        CLOG_DEBUG(Perf, "Simulate application: sleep for {} microseconds",
+        CLOG_INFO(Perf, "Simulate application: sleep for {} microseconds",
                    sleepFor.count());
         std::this_thread::sleep_for(sleepFor);
     }
 
     std::chrono::duration<double> ledgerTimeSeconds = ledgerTime.Stop();
-    CLOG_DEBUG(Perf, "Applied ledger in {} seconds", ledgerTimeSeconds.count());
+    CLOG_INFO(Perf, "=== Is main thread? {}:  Applied ledger in {} seconds", threadIsMain(), ledgerTimeSeconds.count());
 }
 
 void

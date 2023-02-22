@@ -52,6 +52,7 @@ BasicWork::resetWaitingTimer()
 {
     if (mWaitingTimer)
     {
+        CLOG_INFO(Work, "About to reset the damn VirtualTimer");
         mWaitingTimer->cancel();
         mWaitingTimer.reset();
     }
@@ -307,10 +308,11 @@ BasicWork::wakeUp(std::function<void()> innerCallback)
     // Work should not be interrupted when retrying or destructing
     if (mState != InternalState::WAITING)
     {
+        CLOG_TRACE(Work, "Is main thread? {}:  wakeUp(), work is not in WAITING state, noop", threadIsMain());
         return;
     }
 
-    CLOG_TRACE(Work, "Waking up: {}", getName());
+    CLOG_DEBUG(Work, "Is main thread? {}:  Waking up task {}", threadIsMain(), getName());
     setState(InternalState::RUNNING);
 
     // If we woke up because of the waiting timer firing, reset it
@@ -318,14 +320,22 @@ BasicWork::wakeUp(std::function<void()> innerCallback)
 
     if (innerCallback)
     {
-        CLOG_TRACE(Work, "{} woke up and is executing its callback", getName());
+        CLOG_DEBUG(Work, "Is main thread? {}:  task has callback, invoking innerCallback().", threadIsMain());
         innerCallback();
-    }
+    } else {
+        CLOG_DEBUG(Work, "Is main thread? {}:  task has NO callback", threadIsMain());
+     }
 
     if (mNotifyCallback)
     {
+        CLOG_DEBUG(Work, "Is main thread? {}: About to notify callback for task.", threadIsMain());
         mNotifyCallback();
-    }
+    } else {
+        CLOG_DEBUG(Work, "Is main thread? {}: task No callback to notify.", threadIsMain());
+     }
+
+    CLOG_DEBUG(Work, "Is main thread? {}:   END - Waking up task {}", threadIsMain(), getName());
+
 }
 
 std::function<void()>

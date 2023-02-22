@@ -125,7 +125,7 @@ ApplicationImpl::ApplicationImpl(VirtualClock& clock, Config const& cfg)
     while (t--)
     {
         auto thread = std::thread{[this]() {
-            runCurrentThreadWithLowPriority();
+            runCurrentThreadWithHighPriority();
             mWorkerIOContext.run();
         }};
         mWorkerThreads.emplace_back(std::move(thread));
@@ -1058,7 +1058,7 @@ ApplicationImpl::postOnMainThread(std::function<void()>&& f, std::string&& name,
                                   Scheduler::ActionType type)
 {
     LogSlowExecution isSlow{name, LogSlowExecution::Mode::MANUAL,
-                            "executed after"};
+                            "slow execution of task on main thread - executed after"};
     mVirtualClock.postAction(
         [this, f = std::move(f), isSlow]() {
             mPostOnMainThreadDelay.Update(isSlow.checkElapsedTime());
@@ -1072,7 +1072,7 @@ ApplicationImpl::postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName)
 {
     LogSlowExecution isSlow{std::move(jobName), LogSlowExecution::Mode::MANUAL,
-                            "executed after"};
+                            "slow execution of task on bgthread - executed after"};
     asio::post(getWorkerIOContext(), [this, f = std::move(f), isSlow]() {
         mPostOnBackgroundThreadDelay.Update(isSlow.checkElapsedTime());
         f();

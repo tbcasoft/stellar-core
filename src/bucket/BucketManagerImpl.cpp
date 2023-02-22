@@ -152,7 +152,10 @@ std::string const&
 BucketManagerImpl::getTmpDir()
 {
     ZoneScoped;
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== getTmpDir - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== getTmpDir - Acquired mutex");
+
     if (!mWorkDir)
     {
         TmpDir t = mTmpDirManager->tmpDir("bucket");
@@ -241,7 +244,9 @@ BucketManagerImpl::getMergeTimer()
 MergeCounters
 BucketManagerImpl::readMergeCounters()
 {
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== readMergeCounters - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== readMergeCounters - Acquired mutex");
     return mMergeCounters;
 }
 
@@ -331,7 +336,10 @@ MergeCounters::operator==(MergeCounters const& other) const
 void
 BucketManagerImpl::incrMergeCounters(MergeCounters const& delta)
 {
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== incrMergeCounters - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== incrMergeCounters - Acquired mutex");
+
     mMergeCounters += delta;
 }
 
@@ -356,7 +364,9 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
 {
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== adoptFileAsBucket - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== adoptFileAsBucket - Acquired mutex");
 
     if (mergeKey)
     {
@@ -436,7 +446,10 @@ BucketManagerImpl::noteEmptyMergeOutput(MergeKey const& mergeKey)
     // because it'd over-identify multiple individual inputs with the empty
     // output, potentially retaining far too many inputs, as lots of different
     // mergeKeys result in an empty output.
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== noteEmptyMergeOutput - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== noteEmptyMergeOutput - Acquired mutex");
+
     CLOG_TRACE(Bucket, "BucketManager::noteEmptyMergeOutput({})", mergeKey);
     mLiveFutures.erase(mergeKey);
 }
@@ -445,7 +458,9 @@ std::shared_ptr<Bucket>
 BucketManagerImpl::getBucketByHash(uint256 const& hash)
 {
     ZoneScoped;
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== getBucketByHash - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== getBucketByHash - Acquired mutex");
     if (isZero(hash))
     {
         return std::make_shared<Bucket>();
@@ -476,7 +491,10 @@ std::shared_future<std::shared_ptr<Bucket>>
 BucketManagerImpl::getMergeFuture(MergeKey const& key)
 {
     ZoneScoped;
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== getMergeFuture - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== getMergeFuture - Acquired mutex");
+
     MergeCounters mc;
     auto i = mLiveFutures.find(key);
     if (i == mLiveFutures.end())
@@ -522,7 +540,10 @@ BucketManagerImpl::putMergeFuture(
 {
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "==putMergeFuture - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== putMergeFuture - Acquired mutex");
+
     CLOG_TRACE(
         Bucket,
         "BucketManager::putMergeFuture storing future for running merge {}",
@@ -534,7 +555,9 @@ BucketManagerImpl::putMergeFuture(
 void
 BucketManagerImpl::clearMergeFuturesForTesting()
 {
+    CLOG_INFO(Bucket, "==clearMergeFuturesForTesting - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "==clearMergeFuturesForTesting - Acquired mutex");
     mLiveFutures.clear();
 }
 #endif
@@ -619,7 +642,9 @@ BucketManagerImpl::cleanupStaleFiles()
         return;
     }
 
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "==cleanupStaleFiles - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "==cleanupStaleFiles - Acquired mutex");
     auto referenced = getReferencedBuckets();
     std::transform(std::begin(mSharedBuckets), std::end(mSharedBuckets),
                    std::inserter(referenced, std::end(referenced)),
@@ -645,10 +670,16 @@ void
 BucketManagerImpl::forgetUnreferencedBuckets()
 {
     ZoneScoped;
-    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
+    CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - About to acquire mutex");
+    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - Acquired mutex");
+
     auto referenced = getReferencedBuckets();
 
-    for (auto i = mSharedBuckets.begin(); i != mSharedBuckets.end();)
+    CLOG_INFO(Bucket,  "== START - Is main thread? {}: size of shared buckets {}, size of referenced buckets {}.", threadIsMain()
+        , mSharedBuckets.size(), referenced.size());
+
+    for (auto i = mSharedBuckets.begin(); i != mSharedBuckets.end();)  //iterate through each shared bucket
     {
         // Standard says map iterators other than the one you're erasing remain
         // valid.
@@ -665,7 +696,12 @@ BucketManagerImpl::forgetUnreferencedBuckets()
         // we're the first and last to know about it. Otherwise buckets might
         // race on deleting the underlying file from one another.
 
-        if (referenced.find(j->first) == referenced.end() &&
+        std::set<stellar::Hash>::iterator referencedBucketIt;
+        referencedBucketIt = referenced.find(j->first); //if iterator, shared bucket cannot be remove as it's being used.  Complexity is logarithmic in size.
+
+        std::set<stellar::Hash>::iterator pastTheEndElmentIt; //the theoretical element that would follow the last element in the set container
+        pastTheEndElmentIt = referenced.end(); //Complexity is constant.
+        if (referencedBucketIt == pastTheEndElmentIt &&
             j->second.use_count() == 1)
         {
             auto filename = j->second->getFilename();
@@ -674,10 +710,11 @@ BucketManagerImpl::forgetUnreferencedBuckets()
                        filename);
             if (!filename.empty() && !mApp.getConfig().DISABLE_BUCKET_GC)
             {
-                CLOG_TRACE(Bucket, "removing bucket file: {}", filename);
+                CLOG_INFO(Bucket, "About to remove bucket file: {}", filename);
                 std::remove(filename.c_str());
                 auto gzfilename = filename + ".gz";
                 std::remove(gzfilename.c_str());
+                CLOG_INFO(Bucket, "Removed bucket file: {}", filename);
             }
 
             // Dropping this bucket means we'll no longer be able to
@@ -687,6 +724,11 @@ BucketManagerImpl::forgetUnreferencedBuckets()
             for (auto const& forgottenMergeKey :
                  mFinishedMerges.forgetAllMergesProducing(j->first))
             {
+
+                auto numOfShallowBuckets = forgottenMergeKey.mInputShadowBuckets.size();
+                CLOG_INFO(Bucket,  "== size of shallow buckets {}.", numOfShallowBuckets);
+
+
                 // There should be no futures alive with this output: we
                 // switched to storing only weak input/output mappings when any
                 // merge producing the bucket completed (in adoptFileAsBucket),
@@ -695,7 +737,7 @@ BucketManagerImpl::forgetUnreferencedBuckets()
                 // race we missed, so double check & mop up here. Worst case
                 // we prevent a slow memory leak at the cost of redoing merges
                 // we might have been able to reattach to.
-                auto f = mLiveFutures.find(forgottenMergeKey);
+                auto f = mLiveFutures.find(forgottenMergeKey);  //Note: search time is constant
                 if (f != mLiveFutures.end())
                 {
                     CLOG_WARNING(
@@ -707,10 +749,12 @@ BucketManagerImpl::forgetUnreferencedBuckets()
             }
 
             // All done, delete the bucket from the shared map.
-            mSharedBuckets.erase(j);
+            CLOG_DEBUG(Bucket, "Removing bucket from shared map");
+            mSharedBuckets.erase(j);  //complexity of constant time
         }
     }
     mSharedBucketsSize.set_count(mSharedBuckets.size());
+    CLOG_INFO(Bucket,  "== END - Is main thread? {}: processed unreferenced buckets.", threadIsMain());
 }
 
 void

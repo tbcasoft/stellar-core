@@ -1,4 +1,19 @@
 #include "main/StellarCoreVersion.h"
 
+/*
+
+Variable VERSION is populated within sr/Makefile.in
+
+Notes derived from https://developers.stellar.org/docs/run-core-node/installation#release-version
+
+The version number scheme that we follow is protocol_version.release_number.patch_number where:
+protocol_version is the maximum protocol version supported by that release (all versions are 100% backward compatible),
+release_number is bumped when a set of new features or bug fixes not impacting the protocol are included in the release,
+patch_number is used when a critical fix has to be deployed.
+
+E.g. v17.0.0rc1-3-g871c5e1f-dirty
+E.g. stellar-core 17.0.0 (096f6a766ed6aa08e13519371e842b90f01df841)
+*/
+
 const std::string STELLAR_CORE_VERSION = "%%VERSION%%";
 

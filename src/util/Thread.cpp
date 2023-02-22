@@ -78,4 +78,28 @@ runCurrentThreadWithLowPriority()
 }
 
 #endif
+
+/*
+Launch processes with high priorty of 0.
+*/
+void runCurrentThreadWithHighPriority() {
+    /*
+     Nice is a command-line utility in Linux that allows you to set the “niceness” value of processes.  It is used to start a process with a defined priority. 
+
+     When you start any program or process without any defined priority, nice sets a default priority of 10. 
+     The kernel uses this value to schedule the execution of the process.
+
+     A process's nice value is a nonnegative number for which a MORE positive value results in a LOWER CPU priority.
+     A maximum nice value of 2*{NZERO}-1 (equivalent value of 19) and a minimum value of zero are imposed by the system.
+    */
+    constexpr auto const HIGH_PRIORITY_NICE = 0;
+    auto newNice = nice(HIGH_PRIORITY_NICE);
+    if (newNice != HIGH_PRIORITY_NICE)
+    {
+        LOG_WARNING(DEFAULT_LOG, "Unable to run worker thread with high priority. "
+                               "Normal priority (19?)will be used.");
+    } else {
+        LOG_INFO(DEFAULT_LOG, "RUNNING worker thread with high priority of 0");
+    }
+}
 }
