@@ -9,3 +9,5 @@
 </p>
 
 This stellar-core is a superset of TBCA's version of stellar-core (e.g. version within check 2.10).  This stellar-core contains optimization to the "catch-up" process.
+
+The build job is https://ec2-13-57-169-109.us-west-1.compute.amazonaws.com/job/stellar-core-catchup/
