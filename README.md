@@ -9,3 +9,5 @@
 </p>
 
 This is TBCA's version of the community's stellar-core.  Our version contains fixes, enhancements for our HIVEX blockchain.
+
+The build job is https://ec2-13-57-169-109.us-west-1.compute.amazonaws.com/job/stellar-core/
