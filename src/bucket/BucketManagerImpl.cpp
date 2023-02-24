@@ -153,7 +153,7 @@ BucketManagerImpl::getTmpDir()
 {
     ZoneScoped;
     CLOG_INFO(Bucket, "== getTmpDir - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== getTmpDir - Acquired mutex");
 
     if (!mWorkDir)
@@ -245,7 +245,7 @@ MergeCounters
 BucketManagerImpl::readMergeCounters()
 {
     CLOG_INFO(Bucket, "== readMergeCounters - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== readMergeCounters - Acquired mutex");
     return mMergeCounters;
 }
@@ -337,7 +337,7 @@ void
 BucketManagerImpl::incrMergeCounters(MergeCounters const& delta)
 {
     CLOG_INFO(Bucket, "== incrMergeCounters - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== incrMergeCounters - Acquired mutex");
 
     mMergeCounters += delta;
@@ -364,8 +364,7 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
 {
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
-    CLOG_INFO(Bucket, "== adoptFileAsBucket - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== adoptFileAsBucket - Acquired mutex");
 
     if (mergeKey)
@@ -447,7 +446,7 @@ BucketManagerImpl::noteEmptyMergeOutput(MergeKey const& mergeKey)
     // output, potentially retaining far too many inputs, as lots of different
     // mergeKeys result in an empty output.
     CLOG_INFO(Bucket, "== noteEmptyMergeOutput - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== noteEmptyMergeOutput - Acquired mutex");
 
     CLOG_TRACE(Bucket, "BucketManager::noteEmptyMergeOutput({})", mergeKey);
@@ -459,7 +458,7 @@ BucketManagerImpl::getBucketByHash(uint256 const& hash)
 {
     ZoneScoped;
     CLOG_INFO(Bucket, "== getBucketByHash - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== getBucketByHash - Acquired mutex");
     if (isZero(hash))
     {
@@ -492,7 +491,7 @@ BucketManagerImpl::getMergeFuture(MergeKey const& key)
 {
     ZoneScoped;
     CLOG_INFO(Bucket, "== getMergeFuture - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== getMergeFuture - Acquired mutex");
 
     MergeCounters mc;
@@ -541,7 +540,7 @@ BucketManagerImpl::putMergeFuture(
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
     CLOG_INFO(Bucket, "==putMergeFuture - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== putMergeFuture - Acquired mutex");
 
     CLOG_TRACE(
@@ -643,7 +642,7 @@ BucketManagerImpl::cleanupStaleFiles()
     }
 
     CLOG_INFO(Bucket, "==cleanupStaleFiles - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "==cleanupStaleFiles - Acquired mutex");
     auto referenced = getReferencedBuckets();
     std::transform(std::begin(mSharedBuckets), std::end(mSharedBuckets),
@@ -671,7 +670,7 @@ BucketManagerImpl::forgetUnreferencedBuckets()
 {
     ZoneScoped;
     CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - About to acquire mutex");
-    std::lock_guard<std::mutex> lock(mBucketSimpleMutex);
+    std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - Acquired mutex");
 
     auto referenced = getReferencedBuckets();
@@ -754,6 +753,9 @@ BucketManagerImpl::forgetUnreferencedBuckets()
         }
     }
     mSharedBucketsSize.set_count(mSharedBuckets.size());
+    
+    //TODO: vdn - explicit unlock
+    
     CLOG_INFO(Bucket,  "== END - Is main thread? {}: processed unreferenced buckets.", threadIsMain());
 }
 
