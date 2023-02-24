@@ -8,25 +8,6 @@
 <a href="https://github.com/stellar/stellar-core/actions"><img alt="Build Status" src="https://github.com/stellar/stellar-core/workflows/.github/workflows/build.yml/badge.svg?branch=auto" /></a>
 </p>
 
-Stellar-core is a replicated state machine that maintains a local copy of a cryptographic ledger and processes transactions against it, in consensus with a set of peers.
-It implements the [Stellar Consensus Protocol](https://github.com/stellar/stellar-core/blob/master/src/scp/readme.md), a _federated_ consensus protocol.
-It is written in C++14 and runs on Linux, OSX and Windows.
-Learn more by reading the [overview document](https://github.com/stellar/stellar-core/blob/master/docs/readme.md).
+This stellar-core is a superset of TBCA's version of stellar-core (e.g. version within check 2.10).  This stellar-core contains optimization to the "catch-up" process.
 
-# Documentation
-
-Documentation of the code's layout and abstractions, as well as for the
-functionality available, can be found in
-[`./docs`](https://github.com/stellar/stellar-core/tree/master/docs).
-
-# Installation
-
-See [Installation](./INSTALL.md)
-
-# Contributing
-
-See [Contributing](./CONTRIBUTING.md)
-
-# Running tests
-
-See [running tests](./CONTRIBUTING.md#running-tests)
+The build job is https://ec2-13-57-169-109.us-west-1.compute.amazonaws.com/job/stellar-core-catchup/
