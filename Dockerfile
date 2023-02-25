@@ -58,4 +58,4 @@ RUN echo "=== stellar-core built, now to compress the executable using UPX ==="
 RUN wget https://github.com/upx/upx/releases/download/v4.0.1/upx-4.0.1-amd64_linux.tar.xz
 RUN tar xvf upx-4.0.1-amd64_linux.tar.xz
 RUN ./upx-4.0.1-amd64_linux/upx src/stellar-core
-RUN echo "Looking for stellar-core binary: $(find . -name "yes" -print)"
+RUN echo "Looking for stellar-core binary in curr dir: $(pwd): $(find . -name "stellar-core" -print)"
