@@ -73,46 +73,11 @@ WriteSnapshotWork::onRun()
             CLOG_INFO(History, "Is main thread? {}:  Witin body of executed work:  Writing history blocks is NOT done.", threadIsMain());
         }
 
-        // Not ideal, but needed to prevent race conditions with
-        // main thread, since BasicWork's state is not thread-safe. This is a
-        // temporary workaround, as a cleaner solution is needed.
-
-        CLOG_INFO(History, "Is main thread? {}:  Witin body of executed work {}, about to change state of work on a different background thread.", threadIsMain()
-            , self->getName());
-        //self->mApp.postOnMainThread(
-        self->mApp.postOnBackgroundThread(  
-            [weak, success]() {
-                auto self = weak.lock();
-                if (self)
-                {
-                    CLOG_INFO(History, "Is main thread? {}:  on another bgthread.  Witin body of executed work {}:  about to set it to Done and Success, will also now put it back to RUNNING state."
-                        , threadIsMain(), self->getName());
-                    self->mDone = true;
-                    self->mSuccess = success;
-                    self->wakeUp();
-                    CLOG_INFO(History, "Is main thread? {}:  on another bgthread.  Witin body of executed work {}:  set to Done, Success, and transition task to RUNNING state."
-                        , threadIsMain(), self->getName());
-                }
-            },
-            "WriteSnapshotWork: finish");
-
-        /*
-        TODO: #####  why not just transition state for task in the current executing thread?
-
-        auto self = weak.lock();  //get reference to task
-        if (self) //if work has not been processed by any other thread, do it
-        {
-            CLOG_INFO(History, "Is main thread? {}:   Witin body of executed work {}:  about to set it to Done and Success, will also now put it back to RUNNING state."
-                , threadIsMain(), self->getName());
-                                self->mDone = true;
-            self->mSuccess = success;
-            self->wakeUp();
-            CLOG_INFO(History, "Is main thread? {}:  on another bgthread.  Witin body of executed work {}:  set to Done, Success, and transition task to RUNNING state."
-                , threadIsMain(), self->getName());
-            
-        }
-        */
-
+        CLOG_INFO(History, "Is main thread? {}:   Witin body of executed work {}:  about to set it to Done and Success, will also now put it back to RUNNING state."
+            , threadIsMain(), self->getName());
+        self->mDone = true;
+        self->mSuccess = success;
+        self->wakeUp();
         CLOG_INFO(History, "Is main thread? {}:  Witin body of executed work {}, completed changing state of work..", threadIsMain(), self->getName());  
     };
 

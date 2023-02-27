@@ -152,9 +152,9 @@ std::string const&
 BucketManagerImpl::getTmpDir()
 {
     ZoneScoped;
-    CLOG_INFO(Bucket, "== getTmpDir - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== getTmpDir - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== getTmpDir - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== getTmpDir - Acquired mutex");
 
     if (!mWorkDir)
     {
@@ -244,9 +244,9 @@ BucketManagerImpl::getMergeTimer()
 MergeCounters
 BucketManagerImpl::readMergeCounters()
 {
-    CLOG_INFO(Bucket, "== readMergeCounters - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== readMergeCounters - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== readMergeCounters - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== readMergeCounters - Acquired mutex");
     return mMergeCounters;
 }
 
@@ -336,9 +336,9 @@ MergeCounters::operator==(MergeCounters const& other) const
 void
 BucketManagerImpl::incrMergeCounters(MergeCounters const& delta)
 {
-    CLOG_INFO(Bucket, "== incrMergeCounters - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== incrMergeCounters - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== incrMergeCounters - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== incrMergeCounters - Acquired mutex");
 
     mMergeCounters += delta;
 }
@@ -365,7 +365,7 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== adoptFileAsBucket - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== adoptFileAsBucket - Acquired mutex");
 
     if (mergeKey)
     {
@@ -445,9 +445,9 @@ BucketManagerImpl::noteEmptyMergeOutput(MergeKey const& mergeKey)
     // because it'd over-identify multiple individual inputs with the empty
     // output, potentially retaining far too many inputs, as lots of different
     // mergeKeys result in an empty output.
-    CLOG_INFO(Bucket, "== noteEmptyMergeOutput - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== noteEmptyMergeOutput - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== noteEmptyMergeOutput - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== noteEmptyMergeOutput - Acquired mutex");
 
     CLOG_TRACE(Bucket, "BucketManager::noteEmptyMergeOutput({})", mergeKey);
     mLiveFutures.erase(mergeKey);
@@ -457,9 +457,9 @@ std::shared_ptr<Bucket>
 BucketManagerImpl::getBucketByHash(uint256 const& hash)
 {
     ZoneScoped;
-    CLOG_INFO(Bucket, "== getBucketByHash - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== getBucketByHash - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== getBucketByHash - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== getBucketByHash - Acquired mutex");
     if (isZero(hash))
     {
         return std::make_shared<Bucket>();
@@ -490,9 +490,9 @@ std::shared_future<std::shared_ptr<Bucket>>
 BucketManagerImpl::getMergeFuture(MergeKey const& key)
 {
     ZoneScoped;
-    CLOG_INFO(Bucket, "== getMergeFuture - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== getMergeFuture - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== getMergeFuture - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== getMergeFuture - Acquired mutex");
 
     MergeCounters mc;
     auto i = mLiveFutures.find(key);
@@ -539,9 +539,9 @@ BucketManagerImpl::putMergeFuture(
 {
     ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
-    CLOG_INFO(Bucket, "==putMergeFuture - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "==putMergeFuture - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== putMergeFuture - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== putMergeFuture - Acquired mutex");
 
     CLOG_TRACE(
         Bucket,
@@ -554,9 +554,9 @@ BucketManagerImpl::putMergeFuture(
 void
 BucketManagerImpl::clearMergeFuturesForTesting()
 {
-    CLOG_INFO(Bucket, "==clearMergeFuturesForTesting - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "==clearMergeFuturesForTesting - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "==clearMergeFuturesForTesting - Acquired mutex");
+    CLOG_DEBUG(Bucket, "==clearMergeFuturesForTesting - Acquired mutex");
     mLiveFutures.clear();
 }
 #endif
@@ -641,9 +641,9 @@ BucketManagerImpl::cleanupStaleFiles()
         return;
     }
 
-    CLOG_INFO(Bucket, "==cleanupStaleFiles - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "==cleanupStaleFiles - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "==cleanupStaleFiles - Acquired mutex");
+    CLOG_DEBUG(Bucket, "==cleanupStaleFiles - Acquired mutex");
     auto referenced = getReferencedBuckets();
     std::transform(std::begin(mSharedBuckets), std::end(mSharedBuckets),
                    std::inserter(referenced, std::end(referenced)),
@@ -669,9 +669,9 @@ void
 BucketManagerImpl::forgetUnreferencedBuckets()
 {
     ZoneScoped;
-    CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - About to acquire mutex");
+    CLOG_DEBUG(Bucket, "== forgetUnreferencedBuckets - About to acquire mutex");
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG_INFO(Bucket, "== forgetUnreferencedBuckets - Acquired mutex");
+    CLOG_DEBUG(Bucket, "== forgetUnreferencedBuckets - Acquired mutex");
 
     auto referenced = getReferencedBuckets();
 
