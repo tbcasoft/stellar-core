@@ -29,6 +29,11 @@ WriteSnapshotWork::WriteSnapshotWork(Application& app,
 {
 }
 
+/*
+A task placed on a work scheduler (see HistoryManagerImpl::takeSnapshotAndPublish).  The work scheduler will start this task.
+Purpose of this task is to publish any queued checkpoints.  It is "step 3 - About to publish any checkpoints queued in the database"
+in closing a ledger block.
+*/
 BasicWork::State
 WriteSnapshotWork::onRun()
 {

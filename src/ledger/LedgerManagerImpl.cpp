@@ -735,7 +735,7 @@ LedgerManagerImpl::closeLedger(LedgerCloseData const& ledgerData)
     ltx.commit();
 
     // step 3
-    CLOG_INFO(Ledger, "Is main thread? {}:  About to publish any checkpoints queued in the database.", threadIsMain());
+    CLOG_INFO(Ledger, "Is main thread? {}:  About to publish queued checkpoints (from step 1).  NOTE: this work is done async.", threadIsMain());
     hm.publishQueuedHistory();
     CLOG_INFO(Ledger, "Is main thread? {}:  About to emit log message and updated status to HISTORY_PUBLISH to desvcribe current publishing state"
         , threadIsMain());
