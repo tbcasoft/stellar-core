@@ -483,9 +483,6 @@ Peer::sendMessage(StellarMessage const& msg, bool log)
 void
 Peer::recvMessage(xdr::msg_ptr const& msg)
 {
-
-    CLOG_INFO(Herder, "YO -- xdr msg");
-
     ZoneScoped;
     if (shouldAbort())
     {
@@ -500,12 +497,6 @@ Peer::recvMessage(xdr::msg_ptr const& msg)
         {
             ZoneNamedN(xdrZone, "XDR deserialize", true);
             xdr::xdr_from_msg(msg, am);
-
-            auto peerId = am.v0().message.envelope().statement.nodeID;  //derive from stellar-core/src/overlay/Peer.cpp
-            string peerPublicKey = mApp.getConfig().toShortString(peerId);
-            auto ledgerSeqNo = am.v0().message.getSCPLedgerSeq();
-            CLOG_INFO(Herder, "received xdr msg deseriablized and authenicated. Ledger seq no {}, from peer with public key {}", 
-                ledgerSeqNo, peerPublicKey);
         }
 
 
@@ -551,23 +542,10 @@ Peer::recvMessage(AuthenticatedMessage const& msg)
 {
     ZoneScoped; //macro defined by Tracy profiler allowing you to measure the execution time and other performance metrics of that code block.
 
-    CLOG_INFO(TbcaPeer, "YO -- received authenticated msg, type{}", msg.v0().message.type());
-
-    //auto peerId = msg.v0().message.envelope().statement.nodeID;  //derive from stellar-core/src/overlay/Peer.cpp
-    //string peerPublicKey = mApp.getConfig().toShortString(peerId);
-    //auto ledgerSeqNo = msg.v0().message.getSCPLedgerSeq();
-
     if (shouldAbort())
     {
-        //CLOG_WARNING(Herder, "this node is shutting down, aborting received authenticated msg.  Ledger seq no {}, from peer {}"
-        //    ,ledgerSeqNo, peerPublicKey);
         return;
     }
-
-
-    //CLOG_INFO(Herder, "authenticated msg for ledger seq no {}, from peer with public key {}", 
-    //    ledgerSeqNo, peerPublicKey);
-
 
     if (mState >= GOT_HELLO && msg.v0().message.type() != ERROR_MSG)
     {
@@ -597,17 +575,8 @@ void
 Peer::recvMessage(StellarMessage const& stellarMsg)
 {
     ZoneScoped;
-
-    CLOG_INFO(TbcaPeer, "YO -- Peer::recvMessage(StellarMessage, type {}", stellarMsg.type());
-
-    //auto peerId = stellarMsg.envelope().statement.nodeID;  //derive from stellar-core/src/overlay/Peer.cpp
-    //string peerPublicKey = mApp.getConfig().toShortString(peerId);
-    //auto ledgerSeqNo = stellarMsg.getSCPLedgerSeq();
-
     if (shouldAbort())
     {
-        //CLOG_WARNING(TbcaPeer, "this node is shutting down, aborting received StellarMessage.  Ledger seq no {}, from peer {}"
-        //    ,ledgerSeqNo, peerPublicKey);
         return;
     }
 
@@ -693,16 +662,10 @@ Peer::recvRawMessage(StellarMessage const& stellarMsg)
     auto peerStr = toString();
     ZoneText(peerStr.c_str(), peerStr.size());
 
-    CLOG_INFO(TbcaPeer, "YO -- Peer::recvRawMessage(StellarMessage)");
-    
-
-    //auto peerId = stellarMsg.envelope().statement.nodeID;  //derive from stellar-core/src/overlay/Peer.cpp
-    //string peerPublicKey = mApp.getConfig().toShortString(peerId);
-    //auto ledgerSeqNo = stellarMsg.getSCPLedgerSeq();
 
     if (shouldAbort())
     {
-        CLOG_WARNING(TbcaPeer, "this node is shutting down, aborting received StellarMessage (type {}) within recvRawMessage().", stellarMsg.type());
+        CLOG_WARNING(TbcaPeer, "this node is shutting down, aborting received StellarMessage (type {}) within recvRawMessage().", stellarMsg.type());    
         return;
     }
 
@@ -720,8 +683,6 @@ Peer::recvRawMessage(StellarMessage const& stellarMsg)
            stellarMsg.type() == AUTH || stellarMsg.type() == ERROR_MSG);
     mApp.getOverlayManager().recordMessageMetric(stellarMsg,
                                                  shared_from_this());
-
-    CLOG_INFO(TbcaPeer, "received StellarMessage within recvRawMessage(). Msg type {}", stellarMsg.type());                                            
 
     switch (stellarMsg.type())
     {
@@ -984,13 +945,6 @@ Peer::recvSCPMessage(StellarMessage const& msg)
                                       .mRecvSCPExternalizeTimer.TimeScope()
                                 : (getOverlayMetrics()
                                        .mRecvSCPNominateTimer.TimeScope()))));
-
-    
-    auto ledgerSeqNo = msg.envelope().statement.slotIndex;
-    auto peerId = msg.envelope().statement.nodeID;
-    string peerPublicKey = mApp.getConfig().toShortString(peerId);
-    CLOG_INFO(TbcaPeer, "received SCP_MESSAGE. Ledger seq no {}, from peer with public key {}", 
-                ledgerSeqNo, peerPublicKey);
 
     std::string codeStr;
     switch (type)

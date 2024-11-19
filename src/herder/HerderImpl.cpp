@@ -501,6 +501,7 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
 
     mSCPMetrics.mEnvelopeReceive.Mark();
 
+
     // **** first perform checks that do NOT require signature verification
     // this allows to fast fail messages that we'd throw away anyways
 
@@ -584,6 +585,12 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
                    mApp.getConfig().toShortString(envelope.statement.nodeID),
                    envelope.statement.pledges.type(),
                    envelope.statement.slotIndex, mApp.getStateHuman());
+
+        //stellar::SCPStatementType statementType = envelope.statement.pledges.type(); //["PREPARE" | "CONFIRM" | "EXTERNALIZE" | "NOMINATE"]
+        auto peerId = envelope.statement.nodeID;
+        string peerPublicKey = mApp.getConfig().toShortString(peerId);
+        CLOG_INFO(TbcaPeer, "HerderImpl::recvSCPEnvelope() - enqueued envelope to SCP queue, statement type {} for Ledger seq no {}, from peer with public key \"{}\", human readable state name {}.", 
+            envelope.statement.pledges.type(), envelope.statement.slotIndex, mApp.getConfig().toShortString(envelope.statement.nodeID), mApp.getStateHuman());
 
         processSCPQueue();
     }
@@ -687,17 +694,30 @@ HerderImpl::processSCPQueueUpToIndex(uint64 slotIndex)
         SCPEnvelopeWrapperPtr envW = mPendingEnvelopes.pop(slotIndex);
         if (envW)
         {
+            /**
+             * this is the main entry point of the SCP library
+             * it processes the envelope, updates the internal state and
+             * invokes the appropriate methods.
+             * 
+             * Note: it invokes BallotProtocol::processEnvelope() which enqueues envelope to mLatestEnvelopes map.
+             */
             auto r = getSCP().receiveEnvelope(envW);
             if (r == SCP::EnvelopeState::VALID)
             {
                 auto const& env = envW->getEnvelope();
                 auto const& st = env.statement;
+
+                auto peerId = st.nodeID;
+                string peerPublicKey = mApp.getConfig().toShortString(peerId);
+
                 if (st.pledges.type() == SCP_ST_EXTERNALIZE)
                 {
                     mHerderSCPDriver.recordSCPExternalizeEvent(
-                        st.slotIndex, st.nodeID, false);
+                        st.slotIndex, st.nodeID, false); //record times for slot to measure key protocol metrics.
                 }
                 mPendingEnvelopes.envelopeProcessed(env);
+                CLOG_INFO(TbcaPeer, "HerderImpl::processSCPQueueUpToIndex - processed scp enveloope (statement type {}) for Ledger seq no {}, from peer with public key {}.", 
+                    st.pledges.type(), slotIndex, peerPublicKey);
             }
         }
         else
