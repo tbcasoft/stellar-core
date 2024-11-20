@@ -2041,7 +2041,7 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
         {
             qSetHash = mSlot.getLocalNode()->getQuorumSetHash();
         }
-        CLOG_INFO(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - determining qset for node {}.  did NOT find scp env within \"mLatestEnvelopes\".  Qset will be derived from the local id config.", nodePublicKey);
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - determining qset for node {}.  did NOT find scp env within \"mLatestEnvelopes\".  Qset will be derived from the local id config.", nodePublicKey);
     }
     else
     {
@@ -2067,7 +2067,7 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
         // the view of the quorum set during consensus
         qSetHash = mSlot.getCompanionQuorumSetHashFromStatement(st);
 
-        CLOG_INFO(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - determining qset for node {} using scp env found within \"mLatestEnvelopes\"", st.slotIndex ,nodePublicKey);
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - determining qset for node {} using scp env found within \"mLatestEnvelopes\"", st.slotIndex ,nodePublicKey);
     }
 
     Json::Value& disagree = ret["disagree"];
@@ -2106,7 +2106,7 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
                 agree++;
                 auto t = st.pledges.type();
 
-                CLOG_INFO(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - found scp env within \"mLatestEnvelopes\" for peer {}, statement type {} ", st.slotIndex ,nPublicKey, t);
+                CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - found scp env within \"mLatestEnvelopes\" for peer {}, statement type {} ", st.slotIndex ,nPublicKey, t);
 
                 if (!(t == SCPStatementType::SCP_ST_EXTERNALIZE ||
                       (t == SCPStatementType::SCP_ST_CONFIRM &&
