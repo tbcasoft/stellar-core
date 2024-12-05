@@ -121,6 +121,15 @@ SCP::getJsonInfo(size_t limit, bool fullKeys)
     return ret;
 }
 
+/**
+ * @brief Get quorum information encoded in json.  This method determines the ledger block to fetch qorum information.
+ * 
+ * @param id 
+ * @param summary 
+ * @param fullKeys 
+ * @param index 
+ * @return Json::Value 
+ */
 Json::Value
 SCP::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys,
                        uint64 index)

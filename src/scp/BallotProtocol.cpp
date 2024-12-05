@@ -133,27 +133,52 @@ BallotProtocol::isNewerStatement(SCPStatement const& oldst,
     return res;
 }
 
+/**
+ * @brief record SCP envelope, key by owner (node id) of envelope.  Relevant invocation is BallotProtocol::processEnvelope().
+ * *Note:  scp envelope is for current ledger block.  Ledger block is derived from BallotProtocol::mSlot member, see processEnvelope().
+ * 
+ * @param env ptr to SCP envelope.  The owner (node id) is derived from envelope.
+ */
 void
 BallotProtocol::recordEnvelope(SCPEnvelopeWrapperPtr env)
 {
     auto const& st = env->getStatement();
+
+    auto peerId = st.nodeID;
+    //std::string peerPublicKey = KeyUtils::toShortString(peerId);
+    std::string peerPublicKey = KeyUtils::toStrKey(peerId);
+    auto ledgerSeqNo = st.slotIndex;
+    auto statementType = st.pledges.type();
+
     auto oldp = mLatestEnvelopes.find(st.nodeID);
     if (oldp == mLatestEnvelopes.end())
     {
         mLatestEnvelopes.insert(std::make_pair(st.nodeID, env));
+        CLOG_INFO(TbcaPeer, "BallotProtocol::recordEnvelope() - enqueued to map \"mLatestEnvelopes\"  scp env, statement type {}, for Ledger seq no {}, from peer with public key {}).", 
+                statementType, ledgerSeqNo, peerPublicKey);
     }
     else
     {
         oldp->second = env;
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::recordEnvelope() - scp env, statement type {}, already exist within map \"mLatestEnvelopes\" for Ledger seq no {}, from peer with public key {})", 
+                statementType, ledgerSeqNo, peerPublicKey);
     }
     mSlot.recordStatement(env->getStatement());
 }
 
+/**
+ * @brief Note: this method only process envelope is for the current slot index.
+ * 
+ * @param envelope 
+ * @param self 
+ * @return SCP::EnvelopeState 
+ */
 SCP::EnvelopeState
 BallotProtocol::processEnvelope(SCPEnvelopeWrapperPtr envelope, bool self)
 {
+    //===  ensure statement is for the current ledger index
     ZoneScoped;
-    dbgAssert(envelope->getStatement().slotIndex == mSlot.getSlotIndex());
+    dbgAssert(envelope->getStatement().slotIndex == mSlot.getSlotIndex()); 
 
     SCPStatement const& statement = envelope->getStatement();
     NodeID const& nodeID = statement.nodeID;
@@ -2010,6 +2035,16 @@ BallotProtocol::getJsonInfo()
     return ret;
 }
 
+/**
+ * @brief Output quorum information for closed ledger block.  Json output to stellar and captive-core log file.  
+ * Relevant invocation is Slot::getJsonQuorumInfo().
+ * *Note: by the time you get here, the ledger block to fetch quorum information has already been derived.
+ * 
+ * @param id this node id.
+ * @param summary 
+ * @param fullKeys 
+ * @return Json::Value 
+ */
 Json::Value
 BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
 {
@@ -2020,19 +2055,21 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
     SCPBallot b;
     Hash qSetHash;
 
+    std::string nodePublicKey = KeyUtils::toStrKey(id);
+
     auto stateit = mLatestEnvelopes.find(id);
-    if (stateit == mLatestEnvelopes.end())
+    if (stateit == mLatestEnvelopes.end()) //past-the-end element is the theoretical element that would follow the last element in the map container.   It does not point to any element,
     {
         phase = "unknown";
         if (id == mSlot.getLocalNode()->getNodeID())
         {
             qSetHash = mSlot.getLocalNode()->getQuorumSetHash();
         }
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - determining qset for node {}.  did NOT find scp env within \"mLatestEnvelopes\".  Qset will be derived from the local id config.", nodePublicKey);
     }
     else
     {
         auto const& st = stateit->second->getStatement();
-
         switch (st.pledges.type())
         {
         case SCPStatementType::SCP_ST_PREPARE:
@@ -2053,6 +2090,8 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
         // use the companion set here even for externalize to capture
         // the view of the quorum set during consensus
         qSetHash = mSlot.getCompanionQuorumSetHashFromStatement(st);
+
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - determining qset for node {} using scp env found within \"mLatestEnvelopes\"", st.slotIndex ,nodePublicKey);
     }
 
     Json::Value& disagree = ret["disagree"];
@@ -2069,9 +2108,14 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
         return ret;
     }
     LocalNode::forAllNodes(*qSet, [&](NodeID const& n) {
+        std::string nPublicKey = KeyUtils::toStrKey(n);
+
         auto it = mLatestEnvelopes.find(n);
-        if (it == mLatestEnvelopes.end())
+        if (it == mLatestEnvelopes.end())  //past-the-end element is the theoretical element that would follow the last element in the map container.   It does not point to any element,
         {
+            
+            CLOG_WARNING(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - for ledger {}, peer {} does not have scp env \"mLatestEnvelopes\" ", mSlot.getSlotIndex(), nPublicKey);
+
             if (!summary)
             {
                 missing.append(mSlot.getSCPDriver().toStrKey(n, fullKeys));
@@ -2085,6 +2129,9 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
             {
                 agree++;
                 auto t = st.pledges.type();
+
+                CLOG_DEBUG(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() for ledger {} - found scp env within \"mLatestEnvelopes\" for peer {}, statement type {} ", st.slotIndex ,nPublicKey, t);
+
                 if (!(t == SCPStatementType::SCP_ST_EXTERNALIZE ||
                       (t == SCPStatementType::SCP_ST_CONFIRM &&
                        st.pledges.confirm().ballot.counter == UINT32_MAX)))

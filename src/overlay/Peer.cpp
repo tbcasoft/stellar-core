@@ -486,6 +486,7 @@ Peer::recvMessage(xdr::msg_ptr const& msg)
     ZoneScoped;
     if (shouldAbort())
     {
+        CLOG_WARNING(Overlay,  "this node is shutting down, aborting received xdr msg from network.");
         return;
     }
 
@@ -497,6 +498,8 @@ Peer::recvMessage(xdr::msg_ptr const& msg)
             ZoneNamedN(xdrZone, "XDR deserialize", true);
             xdr::xdr_from_msg(msg, am);
         }
+
+
         recvMessage(am);
     }
     catch (xdr::xdr_runtime_error& e)
@@ -537,7 +540,8 @@ Peer::shouldAbort() const
 void
 Peer::recvMessage(AuthenticatedMessage const& msg)
 {
-    ZoneScoped;
+    ZoneScoped; //macro defined by Tracy profiler allowing you to measure the execution time and other performance metrics of that code block.
+
     if (shouldAbort())
     {
         return;
@@ -658,8 +662,10 @@ Peer::recvRawMessage(StellarMessage const& stellarMsg)
     auto peerStr = toString();
     ZoneText(peerStr.c_str(), peerStr.size());
 
+
     if (shouldAbort())
     {
+        CLOG_WARNING(TbcaPeer, "this node is shutting down, aborting received StellarMessage (type {}) within recvRawMessage().", stellarMsg.type());    
         return;
     }
 
@@ -939,6 +945,7 @@ Peer::recvSCPMessage(StellarMessage const& msg)
                                       .mRecvSCPExternalizeTimer.TimeScope()
                                 : (getOverlayMetrics()
                                        .mRecvSCPNominateTimer.TimeScope()))));
+
     std::string codeStr;
     switch (type)
     {
