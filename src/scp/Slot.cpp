@@ -338,6 +338,15 @@ Slot::getJsonInfo(bool fullKeys)
     return ret;
 }
 
+/**
+ * @brief Get quorum information encoded in json.  Relevant invocation is SCP::getJsonQuorumInfo().
+ * *Note: the current ledger index is derived within SCP::getJsonQuorumInfo().
+ * 
+ * @param id 
+ * @param summary 
+ * @param fullKeys 
+ * @return Json::Value 
+ */
 Json::Value
 Slot::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
 {

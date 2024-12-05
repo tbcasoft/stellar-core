@@ -133,6 +133,12 @@ BallotProtocol::isNewerStatement(SCPStatement const& oldst,
     return res;
 }
 
+/**
+ * @brief record SCP envelope, key by owner (node id) of envelope.  Relevant invocation is BallotProtocol::processEnvelope().
+ * *Note:  scp envelope is for current ledger block.  Ledger block is derived from BallotProtocol::mSlot member, see processEnvelope().
+ * 
+ * @param env ptr to SCP envelope.  The owner (node id) is derived from envelope.
+ */
 void
 BallotProtocol::recordEnvelope(SCPEnvelopeWrapperPtr env)
 {
@@ -160,11 +166,19 @@ BallotProtocol::recordEnvelope(SCPEnvelopeWrapperPtr env)
     mSlot.recordStatement(env->getStatement());
 }
 
+/**
+ * @brief Note: this method only process envelope is for the current slot index.
+ * 
+ * @param envelope 
+ * @param self 
+ * @return SCP::EnvelopeState 
+ */
 SCP::EnvelopeState
 BallotProtocol::processEnvelope(SCPEnvelopeWrapperPtr envelope, bool self)
 {
+    //===  ensure statement is for the current ledger index
     ZoneScoped;
-    dbgAssert(envelope->getStatement().slotIndex == mSlot.getSlotIndex());
+    dbgAssert(envelope->getStatement().slotIndex == mSlot.getSlotIndex()); 
 
     SCPStatement const& statement = envelope->getStatement();
     NodeID const& nodeID = statement.nodeID;
@@ -2021,6 +2035,16 @@ BallotProtocol::getJsonInfo()
     return ret;
 }
 
+/**
+ * @brief Output quorum information for closed ledger block.  Json output to stellar and captive-core log file.  
+ * Relevant invocation is Slot::getJsonQuorumInfo().
+ * *Note: by the time you get here, the ledger block to fetch quorum information has already been derived.
+ * 
+ * @param id this node id.
+ * @param summary 
+ * @param fullKeys 
+ * @return Json::Value 
+ */
 Json::Value
 BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
 {
@@ -2089,8 +2113,8 @@ BallotProtocol::getJsonQuorumInfo(NodeID const& id, bool summary, bool fullKeys)
         auto it = mLatestEnvelopes.find(n);
         if (it == mLatestEnvelopes.end())  //past-the-end element is the theoretical element that would follow the last element in the map container.   It does not point to any element,
         {
-
-            CLOG_WARNING(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - peer {} does not have scp env \"mLatestEnvelopes\" ", nPublicKey);
+            
+            CLOG_WARNING(TbcaPeer, "BallotProtocol::getJsonQuorumInfo() - for ledger {}, peer {} does not have scp env \"mLatestEnvelopes\" ", mSlot.getSlotIndex(), nPublicKey);
 
             if (!summary)
             {

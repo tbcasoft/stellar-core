@@ -589,7 +589,7 @@ HerderImpl::recvSCPEnvelope(SCPEnvelope const& envelope)
         //stellar::SCPStatementType statementType = envelope.statement.pledges.type(); //["PREPARE" | "CONFIRM" | "EXTERNALIZE" | "NOMINATE"]
         auto peerId = envelope.statement.nodeID;
         string peerPublicKey = mApp.getConfig().toShortString(peerId);
-        CLOG_INFO(TbcaPeer, "HerderImpl::recvSCPEnvelope() - enqueued envelope to SCP queue, statement type {} for Ledger seq no {}, from peer with public key \"{}\", human readable state name {}.", 
+        CLOG_INFO(TbcaPeer, "HerderImpl::recvSCPEnvelope() - enqueued envelope to SCP queue, statement type {} for Ledger seq no {}, from peer with public key \"{}\", staus (e.g. synced, catching up, joining scp) of node is {}.", 
             envelope.statement.pledges.type(), envelope.statement.slotIndex, mApp.getConfig().toShortString(envelope.statement.nodeID), mApp.getStateHuman());
 
         processSCPQueue();
