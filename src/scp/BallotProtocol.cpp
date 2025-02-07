@@ -154,7 +154,7 @@ BallotProtocol::recordEnvelope(SCPEnvelopeWrapperPtr env)
     if (oldp == mLatestEnvelopes.end())
     {
         mLatestEnvelopes.insert(std::make_pair(st.nodeID, env));
-        CLOG_INFO(TbcaPeer, "BallotProtocol::recordEnvelope() - enqueued to map \"mLatestEnvelopes\"  scp env, statement type {}, for Ledger seq no {}, from peer with public key {}).", 
+        CLOG_DEBUG(TbcaPeer, "BallotProtocol::recordEnvelope() - enqueued to map \"mLatestEnvelopes\"  scp env, statement type {}, for Ledger seq no {}, from peer with public key {}).", 
                 statementType, ledgerSeqNo, peerPublicKey);
     }
     else
